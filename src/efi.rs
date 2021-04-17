@@ -88,7 +88,7 @@ pub fn output_string(string: &str) {
 }
 
 /// Get the memory map for the system from the UEFI
-pub fn get_memory_map(image_handle: EfiHandle) {
+pub fn get_memory_map(_image_handle: EfiHandle) {
     // Get the system table
     let st = EFI_SYSTEM_TABLE.load(Ordering::SeqCst);
 
@@ -124,23 +124,22 @@ pub fn get_memory_map(image_handle: EfiHandle) {
                 free_memory += entry.number_of_pages * 4096;
             }
 
-            /*
             print!("{:016x} {:016x} {:?}\n",
                 entry.physical_start,
                 entry.number_of_pages * 4096,
                 typ);
-            */
         }
     
+        /*
         // Exit boot services
         let ret = ((*(*st).boot_services).exit_boot_services)(
             image_handle, key + 1);
         assert!(ret.0 == 0, "Failed to exit boot services: {:x?}", ret);
-
-        // Now that we're done with boot services, kill the EFI system
-        // table
-        EFI_SYSTEM_TABLE.store(core::ptr::null_mut(), Ordering::SeqCst);
+        */
     }
+    
+    let mem = free_memory;
+    print!("Free memory {}MiB ({}B)\n", mem / (1024 * 1024), mem);
 }
 
 /// A collection of related interfaces. Type VOID *.
