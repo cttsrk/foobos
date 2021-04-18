@@ -92,6 +92,7 @@ impl Rsdp {
     }
 }
 
+
 /// In-memory representation of an Extended RSDP ACPI structure
 #[repr(C, packed)]
 struct RsdpExtended {
