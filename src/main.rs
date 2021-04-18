@@ -1,4 +1,4 @@
-#![feature(asm, panic_info_message)]
+#![feature(asm, panic_info_message, bool_to_option)]
 #![no_std]
 #![no_main]
 
@@ -6,7 +6,7 @@
 mod core_requirements;
 mod efi;
 mod mm;
-// mod acpi;
+mod acpi;
 
 use core::panic::PanicInfo;
 
@@ -29,15 +29,17 @@ fn panic(info: &PanicInfo) -> ! {
 }
 
 #[no_mangle]
-extern fn efi_main(image_handle: EfiHandle,
+extern fn efi_main(_image_handle: EfiHandle,
                    system_table:  *mut EfiSystemTable) -> EfiStatus {
     // First, register the system table in a global so we can use it in
     // other places such as a `print!` macro
     unsafe { efi::register_system_table(system_table); }
 
-    // unsafe { acpi::init(); }
+    efi::get_acpi_table();
 
-    efi::get_memory_map(image_handle);
+    unsafe { acpi::init().unwrap(); }
 
-    panic!("Mooster");
+    // efi::get_memory_map(image_handle);
+
+    panic!("Reached end of `efi_main`");
 }

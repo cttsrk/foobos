@@ -87,6 +87,42 @@ pub fn output_string(string: &str) {
     }
 }
 
+/// Get the base of the ACPI table RSDP
+pub fn get_acpi_table() -> Option<usize> {
+    /// ACPI 2.0 or newer tables should use EFI_ACPI_TABLE_GUID
+    const EFI_ACPI_TABLE_GUID: EfiGuid = EfiGuid(
+        0x8868e871, 0xe4f1, 0x11d3,
+        [0xbc, 0x22, 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81]);  
+
+    /// ACPI 1.0 tables use this GUID
+    const ACPI_TABLE_GUID: EfiGuid = EfiGuid(
+        0xeb9d2d30, 0x2d88, 0x11d3,
+        [0x9a, 0x16, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d]);
+
+    // Get the system table
+    let st = EFI_SYSTEM_TABLE.load(Ordering::SeqCst);
+
+    // We can't do anything if it's null
+    if st.is_null() { return None; }
+
+    // Get a Rust slice to the tables
+    let tables = unsafe {
+        core::slice::from_raw_parts(
+            (*st).tables,
+            (*st).number_of_tables)
+    };
+
+    // First look for the ACPI 2.0 table, if we can't find it, then look
+    // for the ACPI 1.0 table
+    tables.iter().find_map(|EfiConfigurationTable { guid, table }| {
+        (guid == &EFI_ACPI_TABLE_GUID).then_some(*table)
+    }).or_else(|| {
+        tables.iter().find_map(|EfiConfigurationTable { guid, table }| {
+            (guid == &ACPI_TABLE_GUID).then_some(*table)
+        })
+    })
+}
+
 /// Get the memory map for the system from the UEFI
 pub fn get_memory_map(_image_handle: EfiHandle) {
     // Get the system table
@@ -105,6 +141,7 @@ pub fn get_memory_map(_image_handle: EfiHandle) {
         let mut mdesc_size = 0;
         let mut mdesc_version = 0;
 
+        // Get the memory map
         let ret = ((*(*st).boot_services).get_memory_map)(
             &mut size,
             memory_map.as_mut_ptr(),
@@ -112,14 +149,20 @@ pub fn get_memory_map(_image_handle: EfiHandle) {
             &mut mdesc_size,
             &mut mdesc_version);
 
-        assert!(ret.0 == 0, "Get memory map failed: {:x?}", ret);
+        // Check that the memory map was obtained
+        assert!(ret.0 == 0,
+            "Failed to get memory map from EFI: {:#x}", ret.0);
 
-
+        // Go through each memory map entry
         for off in (0..size).step_by(mdesc_size) {
+            // Read the memory as a descriptor
             let entry = core::ptr::read_unaligned(
                 memory_map[off..].as_ptr() as *const EfiMemoryDescriptor);
+
+            // Convert the type into our Rust enum
             let typ: EfiMemoryType = entry.typ.into();
 
+            // Update free memory stats if this memory is available for use
             if typ.avail_post_exit_boot_services() {
                 free_memory += entry.number_of_pages * 4096;
             }
@@ -503,5 +546,27 @@ pub struct EfiSystemTable {
 
     /// A pointer to the EFI Boot Services Table
     boot_services: *const EfiBootServices,
+
+    /// Number of EFI tables
+    number_of_tables: usize,
+
+    /// Pointer to EFI table array
+    tables: *const EfiConfigurationTable,
 }
 
+/// The entry for an EFI configuration table
+#[derive(Debug)]
+#[repr(C)]
+struct EfiConfigurationTable {
+    /// The 128-bit GUID value that uniqely identifies the system
+    /// configuration table
+    guid: EfiGuid,
+
+    /// A ppointer to the table associated with `guid` 
+    table: usize,
+}
+
+/// An EFI `guid` representation
+#[derive(Debug, PartialEq, Eq)]
+#[repr(C)]
+struct EfiGuid(u32, u16, u16, [u8; 8]);
