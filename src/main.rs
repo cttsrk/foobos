@@ -7,7 +7,6 @@ mod core_requirements;
 mod efi;
 mod mm;
 mod acpi;
-mod rangeset;
 
 use core::panic::PanicInfo;
 
@@ -37,15 +36,15 @@ extern fn efi_main(image_handle: EfiHandle,
         // other places such as a `print!` macro
         system_table.register();
 
-        print!("EFI MAIN {:#x}\n", efi_main as u64);
-        print!("\n\n\nFOOBOS INIT\n\n");
-
         // Initialize ACPI
         acpi::init().expect("Failed to initialize ACPI");
 
         // Get the memory map and exit boot services
-        let mm = efi::get_memory_map(image_handle)
+        let mut mm = efi::get_memory_map(image_handle)
             .expect("Failed to get EFI memory map");
+
+        let addr = mm.allocate(1024 * 1024, 4096).unwrap();
+        print!("Allocated {:#x}\n", addr);
 
         print!("{:#x?}\n", mm.entries());
         print!("Physical free: {}\n", mm.sum().unwrap());
@@ -53,6 +52,5 @@ extern fn efi_main(image_handle: EfiHandle,
         print!("EFI MAIN {:#x}\n", efi_main as usize);
     }
 
-    loop {
-    }
+    loop {}
 }

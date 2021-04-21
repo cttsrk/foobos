@@ -7,7 +7,7 @@ cargo build
 qemu-system-x86_64 \
     -smp 2 \
     -accel hvf \
-    -m 128 \
+    -m 512 \
     -nographic \
     -bios ovmf-x64/OVMF_CODE-pure-efi.fd \
     -device driver=e1000,netdev=n0 \

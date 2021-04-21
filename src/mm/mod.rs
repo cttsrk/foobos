@@ -1,5 +1,7 @@
 //! Memory management routines
 
+pub mod rangeset;
+
 use core::mem::size_of;
 
 /// A strongly typed physical address

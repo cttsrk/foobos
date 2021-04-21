@@ -1,5 +1,5 @@
 [build]
-target = "x86_64-unknown-uefi.json"
+target = "x86_64-unknown-uefi"
 
 [unstable]
 build-std = ["core"]
@@ -7,8 +7,15 @@ build-std = ["core"]
 [nightly]
 build-std = ["core"]
 
+
+# XXX: specifying base and code-model other than large fails on machines with
+# memory < 322mbyte, not sure why
 [target.x86_64-unknown-uefi]
 rustflags = """
+    -C link-arg=/base:0x13370000
+    -C link-arg=/fixed
     -C link-args=/debug:dwarf
+    -C relocation-model=static
+    -C code-model=small
 """
 

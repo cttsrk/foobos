@@ -9,7 +9,7 @@
 //! structure.
 
 use core::sync::atomic::{AtomicPtr, Ordering};
-use crate::rangeset::{Range, RangeSet};
+use crate::mm::rangeset::{Range, RangeSet};
 
 /// A `Result` type which wraps an EFI error
 type Result<T> = core::result::Result<T, Error>;
@@ -28,9 +28,6 @@ pub enum Error {
 
     /// An integer overflow occurred when processing EFI memory map data
     MemoryMapIntegerOverflow,
-
-    /// The EFI memory map had more entries than our fixed size array allows
-    MemoryMapOutOfEntries,
 }
 
 /// A strongly typed EFI system table pointer which will disallow the copying
