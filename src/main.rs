@@ -7,10 +7,11 @@ mod core_requirements;
 mod efi;
 mod mm;
 mod acpi;
+mod rangeset;
 
 use core::panic::PanicInfo;
 
-use crate::efi::{EfiHandle, EfiSystemTable, EfiStatus};
+use crate::efi::{EfiHandle, EfiSystemTablePtr, EfiStatusCode};
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
@@ -29,17 +30,29 @@ fn panic(info: &PanicInfo) -> ! {
 }
 
 #[no_mangle]
-extern fn efi_main(_image_handle: EfiHandle,
-                   system_table:  *mut EfiSystemTable) -> EfiStatus {
-    // First, register the system table in a global so we can use it in
-    // other places such as a `print!` macro
-    unsafe { efi::register_system_table(system_table); }
+extern fn efi_main(image_handle: EfiHandle,
+                   system_table: EfiSystemTablePtr) -> EfiStatusCode {
+    unsafe {
+        // First, register the system table in a global so we can use it in
+        // other places such as a `print!` macro
+        system_table.register();
 
-    efi::get_acpi_table();
+        print!("EFI MAIN {:#x}\n", efi_main as u64);
+        print!("\n\n\nFOOBOS INIT\n\n");
 
-    unsafe { acpi::init().unwrap(); }
+        // Initialize ACPI
+        acpi::init().expect("Failed to initialize ACPI");
 
-    // efi::get_memory_map(image_handle);
+        // Get the memory map and exit boot services
+        let mm = efi::get_memory_map(image_handle)
+            .expect("Failed to get EFI memory map");
 
-    panic!("Reached end of `efi_main`");
+        print!("{:#x?}\n", mm.entries());
+        print!("Physical free: {}\n", mm.sum().unwrap());
+
+        print!("EFI MAIN {:#x}\n", efi_main as usize);
+    }
+
+    loop {
+    }
 }

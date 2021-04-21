@@ -9,6 +9,47 @@
 //! structure.
 
 use core::sync::atomic::{AtomicPtr, Ordering};
+use crate::rangeset::{Range, RangeSet};
+
+/// A `Result` type which wraps an EFI error
+type Result<T> = core::result::Result<T, Error>;
+
+/// Errors from EFI calls
+#[derive(Debug)]
+pub enum Error {
+    /// The EFI system table has not been registered
+    NotRegistered,
+
+    /// We failed to get the memory map from EFI
+    MemoryMap(EfiStatus),
+
+    /// We failed to exit EFI boot services
+    ExitBootServices(EfiStatus),
+
+    /// An integer overflow occurred when processing EFI memory map data
+    MemoryMapIntegerOverflow,
+
+    /// The EFI memory map had more entries than our fixed size array allows
+    MemoryMapOutOfEntries,
+}
+
+/// A strongly typed EFI system table pointer which will disallow the copying
+/// of the raw pointer
+#[repr(transparent)]
+pub struct EfiSystemTablePtr(*mut EfiSystemTable);
+
+impl EfiSystemTablePtr {
+    /// Register this system table into a global so it can be used for prints
+    /// which do not take a `self` or a pointer as an argument and thus this
+    /// must be able to be found on a pointer
+    pub unsafe fn register(self) {
+        EFI_SYSTEM_TABLE.compare_and_swap(
+            core::ptr::null_mut(),
+            self.0,
+            Ordering::SeqCst);
+    }
+}
+
 
 /// A pointer to the EFI system table which is saved upon the entry of the
 /// kernel.
@@ -17,17 +58,6 @@ use core::sync::atomic::{AtomicPtr, Ordering};
 ///
 static EFI_SYSTEM_TABLE: AtomicPtr<EfiSystemTable> =
     AtomicPtr::new(core::ptr::null_mut());
-
-/// Register a system table pointer. This is obviously unsafe as it
-/// requires the caller to provide a valid EFI system table pointer.
-///
-/// Only the first non-null system table will be stored into the
-/// `EFI_SYSTEM_TABLE` global
-///
-pub unsafe fn register_system_table(system_table: *mut EfiSystemTable) {
-    EFI_SYSTEM_TABLE.compare_and_swap(core::ptr::null_mut(), system_table,
-        Ordering::SeqCst);
-}
 
 /// Write a `string` to the UEFI console output
 pub fn output_string(string: &str) {
@@ -62,14 +92,18 @@ pub fn output_string(string: &str) {
         tmp[in_use] = chr;
         in_use += 1;
 
-        if in_use == (tmp.len() - 2) {
+        // If the temporary buffer could potentially be full on the next
+        // iteration, we flush it. We do -2 here because we need room for the
+        // worst case which is a carriage return, newline, and null terminator
+        // in the next iteration. We also need to do >= because we can
+        // potentially skip from 29 in use to 31 in use if the 30th character
+        // is a newline.
+        if in_use >= (tmp.len() - 2) {
             // Null terminate the buffer
             tmp[in_use] = 0;
 
             // Write out the buffer
-            unsafe {
-                ((*out).output_string)(out, tmp.as_ptr());
-            }
+            unsafe { ((*out).output_string)(out, tmp.as_ptr()); }
 
             // Clear the buffer
             in_use = 0;
@@ -81,13 +115,12 @@ pub fn output_string(string: &str) {
         // Null terminate the buffer
         tmp[in_use] = 0;
 
-        unsafe {
-            ((*out).output_string)(out, tmp.as_ptr());
-        }
+        unsafe { ((*out).output_string)(out, tmp.as_ptr()); }
     }
 }
 
-/// Get the base of the ACPI table RSDP
+/// Get the base of the ACPI table RSDP. If EFI did not report an ACPI table
+/// then we return `None`.
 pub fn get_acpi_table() -> Option<usize> {
     /// ACPI 2.0 or newer tables should use EFI_ACPI_TABLE_GUID
     const EFI_ACPI_TABLE_GUID: EfiGuid = EfiGuid(
@@ -124,34 +157,38 @@ pub fn get_acpi_table() -> Option<usize> {
 }
 
 /// Get the memory map for the system from the UEFI
-pub fn get_memory_map(_image_handle: EfiHandle) {
+pub fn get_memory_map(image_handle: EfiHandle) -> Result<RangeSet> {
     // Get the system table
     let st = EFI_SYSTEM_TABLE.load(Ordering::SeqCst);
 
     // We can't do anything if it's null
-    if st.is_null() { return; }
+    if st.is_null() { return Err(Error::NotRegistered); }
 
     // Create an empty memory map
     let mut memory_map = [0u8; 8 * 1024];
 
-    let mut free_memory = 0u64;
+    // The Rust memory map
+    let mut usable_memory = RangeSet::new();
+
     unsafe {
+        // Set up the initial arguments to the `get_memory_map` EFI call
         let mut size = core::mem::size_of_val(&memory_map);
         let mut key = 0;
         let mut mdesc_size = 0;
         let mut mdesc_version = 0;
 
         // Get the memory map
-        let ret = ((*(*st).boot_services).get_memory_map)(
+        let ret: EfiStatus = ((*(*st).boot_services).get_memory_map)(
             &mut size,
             memory_map.as_mut_ptr(),
             &mut key,
             &mut mdesc_size,
-            &mut mdesc_version);
+            &mut mdesc_version).into();
 
         // Check that the memory map was obtained
-        assert!(ret.0 == 0,
-            "Failed to get memory map from EFI: {:#x}", ret.0);
+        if ret != EfiStatus::Success {
+            return Err(Error::MemoryMap(ret));
+        }
 
         // Go through each memory map entry
         for off in (0..size).step_by(mdesc_size) {
@@ -162,38 +199,267 @@ pub fn get_memory_map(_image_handle: EfiHandle) {
             // Convert the type into our Rust enum
             let typ: EfiMemoryType = entry.typ.into();
 
-            // Update free memory stats if this memory is available for use
+            // Check if this memory is usable after we exit boot services
             if typ.avail_post_exit_boot_services() {
-                free_memory += entry.number_of_pages * 4096;
-            }
+                if entry.number_of_pages > 0 {
+                    // Get the number of bytes for this memory region
+                    let bytes = entry.number_of_pages.checked_mul(4096)
+                        .ok_or(Error::MemoryMapIntegerOverflow)?;
 
-            print!("{:016x} {:016x} {:?}\n",
-                entry.physical_start,
-                entry.number_of_pages * 4096,
-                typ);
+                    // Compute the end physical address of this region
+                    let end = entry.physical_start.checked_add(bytes - 1)
+                        .ok_or(Error::MemoryMapIntegerOverflow)?;
+
+                    // Set the usable memory information
+                    usable_memory.insert(Range {
+                        start: entry.physical_start,
+                        end:   end
+                    });
+                }
+            }
         }
     
         /*
         // Exit boot services
-        let ret = ((*(*st).boot_services).exit_boot_services)(
-            image_handle, key + 1);
-        assert!(ret.0 == 0, "Failed to exit boot services: {:x?}", ret);
+        let ret: EfiStatus = ((*(*st).boot_services).exit_boot_services)(
+            image_handle, key).into();
+        if ret != EfiStatus::Success {
+            return Err(Error::ExitBootServices(ret));
+        }
         */
     }
     
-    let mem = free_memory;
-    print!("Free memory {}MiB ({}B)\n", mem / (1024 * 1024), mem);
+    Ok(usable_memory)
 }
 
-/// A collection of related interfaces. Type VOID *.
-#[derive(Clone, Copy, Debug)]
-#[repr(C)]
+/// A collection of related interfaces. Type `VOID *`.
+#[derive(Debug)]
+#[repr(transparent)]
 pub struct EfiHandle(usize);
 
-/// Status code
+/// Raw EFI status code
 #[derive(Clone, Copy, Debug)]
-#[repr(C)]
-pub struct EfiStatus(pub usize);
+#[repr(transparent)]
+pub struct EfiStatusCode(usize);
+
+/// EFI status codes
+#[derive(Debug, PartialEq, Eq)]
+pub enum EfiStatus {
+    /// EFI success
+    Success,
+
+    /// An EFI warning (top bit clear)
+    Warning(EfiWarning),
+
+    /// An EFI error (top bit set)
+    Error(EfiError),
+}
+
+impl From<EfiStatusCode> for EfiStatus {
+    fn from(val: EfiStatusCode) -> Self {
+        // Sign extend the error code to make this code bitness agnostic
+        let val = val.0 as i32 as i64 as u64;
+        match val {
+            0 => {
+                Self::Success
+            }
+            0x0000000000000001..=0x7fffffffffffffff => {
+                EfiStatus::Warning(match val & !(1 << 63) {
+                    1 => EfiWarning::UnknownGlyph,
+                    2 => EfiWarning::DeleteFailure,
+                    3 => EfiWarning::WriteFailure,
+                    4 => EfiWarning::BufferTooSmall,
+                    5 => EfiWarning::StaleData,
+                    6 => EfiWarning::FileSystem,
+                    7 => EfiWarning::ResetRequired,
+                    _ => EfiWarning::Unknown(val),
+                })
+            }
+            0x8000000000000000..=0xcfffffffffffffff => {
+                EfiStatus::Error(match val & !(1 << 63) {
+                     1 => EfiError::LoadError,
+                     2 => EfiError::InvalidParameter,
+                     3 => EfiError::Unsupported,
+                     4 => EfiError::BadBufferSize,
+                     5 => EfiError::BufferTooSmall,
+                     6 => EfiError::NotReady,
+                     7 => EfiError::DeviceError,
+                     8 => EfiError::WriteProtected,
+                     9 => EfiError::OutOfResources,
+                    10 => EfiError::VolumeCorrupted,
+                    11 => EfiError::VolumeFull,
+                    12 => EfiError::NoMedia,
+                    13 => EfiError::MediaChanged,
+                    14 => EfiError::NotFound,
+                    15 => EfiError::AccessDenied,
+                    16 => EfiError::NoResponse,
+                    17 => EfiError::NoMapping,
+                    18 => EfiError::Timeout,
+                    19 => EfiError::NotStarted,
+                    20 => EfiError::AlreadyStarted,
+                    21 => EfiError::Aborted,
+                    22 => EfiError::IcmpError,
+                    23 => EfiError::TftpError,
+                    24 => EfiError::ProtocolError,
+                    25 => EfiError::IncompatibleVersion,
+                    26 => EfiError::SecurityViolation,
+                    27 => EfiError::CrcError,
+                    28 => EfiError::EndOfMedia,
+                    31 => EfiError::EndOfFile,
+                    32 => EfiError::InvalidLanguage,
+                    33 => EfiError::CompromisedData,
+                    34 => EfiError::IpAddressConflict,
+                    35 => EfiError::HttpError,
+                    _  => EfiError::Unknown(val),
+                })
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+/// EFI warning codes
+#[derive(Debug, PartialEq, Eq)]
+pub enum EfiWarning {
+    /// The string contained one or more characters that the device could not
+    /// render and were skipped
+    UnknownGlyph,
+
+    /// The handle was closed, but the file was not deleted
+    DeleteFailure,
+
+    /// The handle was closed, but the data to the file was not flushed
+    /// properly
+    WriteFailure,
+
+    /// The resulting buffer was too small, and the data was truncated to the
+    /// buffer size
+    BufferTooSmall,
+
+    /// The data has not been updated within the timeframe set by local policy
+    /// for this type of data
+    StaleData,
+
+    /// The resulting buffer contains UEFI-compliant file system
+    FileSystem,
+
+    /// The operation will proceed across a system reset
+    ResetRequired,
+
+    /// An unknown warning
+    Unknown(u64),
+}
+
+/// EFI error codes
+#[derive(Debug, PartialEq, Eq)]
+pub enum EfiError {
+    /// The image faled to load
+    LoadError,
+
+    /// A parameter was incorrect
+    InvalidParameter,
+
+    /// The operation is not supported
+    Unsupported,
+
+    /// The buffer was not the proper size for the request
+    BadBufferSize,
+
+    /// The buffer is not large enough to hold the requested data. The
+    /// required buffer size is returned in the appropriate parameter when
+    /// this error occurs.
+    BufferTooSmall,
+
+    /// There is no data pending upon return
+    NotReady,
+
+    /// The physical device reported an error while attempting the operation
+    DeviceError,
+
+    /// The device cannot be written to
+    WriteProtected,
+
+    /// A resource has run out
+    OutOfResources,
+
+    /// An inconstancy was detected on the file system, causing the operation
+    /// to fail
+    VolumeCorrupted,
+
+    /// There is no more space on the file system
+    VolumeFull,
+
+    /// The device does not contain any medium to perform the operation
+    NoMedia,
+
+    /// The medium in the device has changed since the last access
+    MediaChanged,
+
+    /// The item was not found
+    NotFound,
+
+    /// Access was denied
+    AccessDenied,
+
+    /// The server was not found or did not respond to the request
+    NoResponse,
+
+    /// A mapping to a device does not exist
+    NoMapping,
+
+    /// The timeout time expired
+    Timeout,
+
+    /// The protocol has not been started
+    NotStarted,
+
+    /// The protocol has already started
+    AlreadyStarted,
+
+    /// The operation was aborted
+    Aborted,
+
+    /// An ICMP error occurred during the network operation
+    IcmpError,
+
+    /// A TFTP error occurred during the network operation
+    TftpError,
+
+    /// A protocol error occurred during the network operation
+    ProtocolError,
+
+    /// The function encountered an internal version that was incompatible
+    /// with a version requested by the caller
+    IncompatibleVersion,
+
+    /// The operation was not performed due to a security violation
+    SecurityViolation,
+
+    /// A CRC error occurred
+    CrcError,
+
+    /// Beginning or end of media was reached
+    EndOfMedia,
+
+    /// The end of the file was reached
+    EndOfFile,
+
+    /// The language specified was invalid
+    InvalidLanguage,
+
+    /// The security status of the data is unknown or compromised and the data
+    /// must be updated or replaced to restore a valid security statut
+    CompromisedData,
+
+    /// There is an address conflict address allocation
+    IpAddressConflict,
+
+    /// An HTTP error occurred during the network operation
+    HttpError,
+
+    /// An unknown error
+    Unknown(u64),
+}
 
 /// A scan code and unicode value for an input keypress
 #[repr(C)]
@@ -276,18 +542,18 @@ struct EfiTableHeader {
     /// conforms. The upper 16 bits of this field contain the major
     /// revision value, and the lower 16 bits contain the minor revision
     /// value. The minor revision values are binary coded decimals and are
-    /// limited to the range of 00..99.
+    /// limited to the range of `00..99`.
     ///
     /// When printed or displayed, UEFI spec revision is referred as
-    /// (Major revision).(Minor revision upper decimal).(Minor revision
-    /// lower decimal), or in case Minor revision lower decimal is set to
-    /// 0 as just (Major revision).(Minor revision upper decimal). For
+    /// `(Major revision).(Minor revision upper decimal).(Minor revision
+    /// lower decimal)`, or in case Minor revision lower decimal is set to
+    /// 0 as just `(Major revision).(Minor revision upper decimal)`. For
     /// example:
     /// 
-    /// A specification with the revision value ((2<<16) | (30)) would be
+    /// A specification with the revision value `((2<<16) | (30))` would be
     /// referred as 2.3;
     ///
-    /// A specification with the revision value ((2<<16) | (31)) would be
+    /// A specification with the revision value `((2<<16) | (31))` would be
     /// referred as 2.3.1
     revision: u32,
 
@@ -308,26 +574,26 @@ struct EfiTableHeader {
 #[derive(Clone, Copy, Default, Debug)]
 #[repr(C)]
 struct EfiMemoryDescriptor {
-    /// Type of the memory region. Type EFI_MEMORY_TYPE is defined in the
-    /// AllocatePages() function description.
+    /// Type of the memory region. Type `EFI_MEMORY_TYPE` is defined in the
+    /// `AllocatePages()` function description.
     typ: u32,
 
     /// Physical address of the first byte in the memory region.
-    /// PhysicalStart must be aligned on a 4KiB boundary, and must not be
-    /// above 0xfffffffffffff000. Type EFI_PHYSICAL_ADDRESS is defined in
-    /// the AllocatePages() function description.
+    /// `PhysicalStart` must be aligned on a 4KiB boundary, and must not be
+    /// above `0xfffffffffffff000`. Type `EFI_PHYSICAL_ADDRESS` is defined in
+    /// the `AllocatePages()` function description.
     physical_start: u64,
 
     /// Virtual address of the first bythe in the memory region.
-    /// VirtualStart must be aligned on a 4KiB boundary, and must not be
-    /// above 0xffffffffffff000. Type EFI_VIRTUAL_ADDRESS is defined in
+    /// `VirtualStart` must be aligned on a 4KiB boundary, and must not be
+    /// above `0xffffffffffff000`. Type `EFI_VIRTUAL_ADDRESS` is defined in
     /// "Related Definitions".
     virtual_start: u64,
 
-    /// Number of 4KiB pages in the memory region. NumberOfPages must not
+    /// Number of 4KiB pages in the memory region. `NumberOfPages` must not
     /// be 0, and must not be any value that would represent a memory page
     /// with a start address, either physical or virtual, above
-    /// 0xfffffffffffff000.
+    /// `0xfffffffffffff000`.
     number_of_pages: u64,
 
     /// Attributes of the memory region that describe the bit mask of
@@ -341,9 +607,9 @@ struct EfiMemoryDescriptor {
 #[repr(C)]
 struct EfiBootServices {
     /// The table header for the EFI Boot Services Table. This header
-    /// contains the EFI_BOOT_SERVICES_SIGNATURE and
-    /// EFI_BOOT_SERVICES_REVISION values along with the size of the
-    /// EFI_BOOT_SERVICES structure and a 32-bit CRC to verify that the
+    /// contains the `EFI_BOOT_SERVICES_SIGNATURE` and
+    /// `EFI_BOOT_SERVICES_REVISION` values along with the size of the
+    /// `EFI_BOOT_SERVICES` structure and a 32-bit CRC to verify that the
     /// contents of the EFI Boot Services Table are valid.
     header: EfiTableHeader,
 
@@ -364,7 +630,7 @@ struct EfiBootServices {
                               memory_map:         *mut u8,
                               map_key:            &mut usize,
                               descriptor_size:    &mut usize,
-                              descriptor_version: &mut u32) -> EfiStatus,
+                              descriptor_version: &mut u32) -> EfiStatusCode,
 
     /// Allocates a pool of a particular type
     _allocate_pool: usize,
@@ -435,24 +701,24 @@ struct EfiBootServices {
 
     /// Terminates boot services
     exit_boot_services: unsafe fn(image_handle: EfiHandle,
-                                  map_key:      usize) -> EfiStatus,
+                                  map_key:      usize) -> EfiStatusCode,
 }
 
 /// This protocol is used to obtain input from the ConsoleIn device. The
-/// EFI specification requires that the EFI_SIMPLE_TEXT_INPUT_PROTOCOL
+/// EFI specification requires that the `EFI_SIMPLE_TEXT_INPUT_PROTOCOL`
 /// supports the same languages as the corresponding
-/// EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.
+/// `EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL`.
 #[repr(C)]
 struct EfiSimpleTextInputProtocol {
     /// Resets the input device hardware
     reset: unsafe fn(this: *const EfiSimpleTextInputProtocol,
-                     extended_verification: bool) -> EfiStatus,
+                     extended_verification: bool) -> EfiStatusCode,
     
     /// Reads the next keystroke from the input device
     read_keystroke: unsafe fn(this: *const EfiSimpleTextInputProtocol,
-                              key:  *mut   EfiInputKey) -> EfiStatus,
+                              key:  *mut   EfiInputKey) -> EfiStatusCode,
 
-    /// Event to use with EFI_BOOT_SERVICES.WaitForEvent() to wait for a
+    /// Event to use with `EFI_BOOT_SERVICES.WaitForEvent()` to wait for a
     /// key to be available.
     /// We don't use the event API, don't expose this function pointer
     _wait_for_key: usize,
@@ -463,16 +729,16 @@ struct EfiSimpleTextInputProtocol {
 struct EfiSimpleTextOutputProtocol {
     /// Resets the text output device hardware
     reset: unsafe fn(this: *const EfiSimpleTextOutputProtocol,
-                     extended_verification: bool) -> EfiStatus,
+                     extended_verification: bool) -> EfiStatusCode,
 
     /// Writes a string to the output device.
     output_string: unsafe fn(this:   *const EfiSimpleTextOutputProtocol,
-                             string: *const u16) -> EfiStatus,
+                             string: *const u16) -> EfiStatusCode,
 
     /// Verifies that all characters in a string can be output to the
     /// target device
     test_string: unsafe fn(this:   *const EfiSimpleTextOutputProtocol,
-                           string: *const u16) -> EfiStatus,
+                           string: *const u16) -> EfiStatusCode,
 
     /// Returns information for an available text mode that the output
     /// device(s) support
@@ -481,8 +747,8 @@ struct EfiSimpleTextOutputProtocol {
     /// Sets the output device(s) to a specified mode
     _set_modfe: usize,
 
-    /// Sets the background and foreground colors for the OutputString()
-    /// and ClearScreen() functions
+    /// Sets the background and foreground colors for the `OutputString()`
+    /// and `ClearScreen()` functions
     _set_attribute: usize,
 
     /// Clears the output device(s) display to the currently selected 
@@ -495,16 +761,16 @@ struct EfiSimpleTextOutputProtocol {
     /// Show or hide the cursor
     _enable_cursor: usize,
 
-    /// Pointer to SIMPLE_TEXT_OUTPUT_MODE data
+    /// Pointer to `SIMPLE_TEXT_OUTPUT_MODE` data
     _mode: usize,
 }
 
 /// Contains pointers to the runtime and boot services tables
 #[repr(C)]
-pub struct EfiSystemTable {
+struct EfiSystemTable {
     /// The table header for an EFI System Table. This header contains the
-    /// EFI_SYSTEM_TABLE_SIGNATURE and EFI_SYSTEM_TABLE_REVISION values
-    /// along with the size of the EFI_SYSTEM_TABLE structure and a 32-bit
+    /// `EFI_SYSTEM_TABLE_SIGNATURE` and `EFI_SYSTEM_TABLE_REVISION` values
+    /// along with the size of the `EFI_SYSTEM_TABLE structure` and a 32-bit
     /// CRC to verify that the contents of the EFI System Table are valid
     header: EfiTableHeader,
 
@@ -517,28 +783,28 @@ pub struct EfiSystemTable {
     firmware_revision: u32,
 
     /// The handle for the active console input device. This handle must
-    /// support EFI_SIMPLE_TEXT_INPUT_PROTOCOL and
-    /// EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.
+    /// support `EFI_SIMPLE_TEXT_INPUT_PROTOCOL` and
+    /// `EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL`.
     console_in_handle: EfiHandle,
 
-    /// A pointer to the EFI_SIMPLE_TEXT_INPUT_PROTOCOL interface that is
-    /// associated with ConsoleInHandle
+    /// A pointer to the `EFI_SIMPLE_TEXT_INPUT_PROTOCOL` interface that is
+    /// associated with `ConsoleInHandle`
     console_in: *const EfiSimpleTextInputProtocol,
 
     /// The handle for the active console output device. This handle must
-    /// support the EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.
+    /// support the `EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL`.
     console_out_handle: EfiHandle,
 
-    /// A pointer to the EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL interface that is
-    /// associated with ConsoleOutHandle
+    /// A pointer to the `EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL` interface that is
+    /// associated with `ConsoleOutHandle`
     console_out: *const EfiSimpleTextOutputProtocol,
 
     /// The handle for the active standard error console device. This
-    /// handle must support the EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL
+    /// handle must support the `EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL`
     console_err_handle: EfiHandle,
 
-    /// A pointer to the EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL interface that is
-    /// associated with StandardErrorHandle
+    /// A pointer to the `EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL` interface that is
+    /// associated with `StandardErrorHandle`
     console_err: *const EfiSimpleTextOutputProtocol,
 
     /// A pointer to the EFI Runtime Services Table
