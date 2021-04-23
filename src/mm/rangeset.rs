@@ -4,6 +4,33 @@
 
 use core::cmp;
 
+/// A `Result` type which wraps a `RangeSet` error
+type Result<T> = core::result::Result<T, Error>;
+
+/// Errors associated with `RangeSet` operations
+#[derive(Debug)]
+pub enum Error {
+    /// An specified index to a range entry was out of bounds
+    InvalidIndex,
+
+    /// A range was specified with an invalid shape ( start > end )
+    InvalidRange,
+
+    /// An operation was performed on the `RangeSet` but there was no more
+    /// space in the fixed allocation for ranges
+    OutOfEntries,
+    
+    /// A request for a free range failed due to not having a free range with
+    /// the size and alignment requested
+    OutOfMemory,
+
+    /// Zero size allocations are not supported
+    ZeroSizeAllocation,
+
+    /// The alignment specified was not a power of two, or was zero
+    InvalidAlignment,
+}
+
 /// An inclusive range. We do not use `RangeInclusive` as it does not
 /// implement `Copy`
 #[derive(Clone, Copy, Debug)]
@@ -42,16 +69,19 @@ impl RangeSet {
     }
 
     /// Delete the Range contained in the RangeSet at `idx`
-    fn delete(&mut self, idx: usize) {
-        assert!(idx < self.in_use as usize, "Index out of bounds");
+    fn delete(&mut self, idx: usize) -> Result<()> {
+        // Make sure we're deleting a valid index
+        if idx >= self.in_use {
+            return Err(Error::InvalidIndex);
+        }
 
         // Copy the deleted range to the end of the list
-        for ii in idx..self.in_use as usize - 1 {
-            self.ranges.swap(ii, ii + 1);
-        }
+        self.ranges.swap(idx, self.in_use - 1);
 
         // Decrement the number of valid ranges
         self.in_use -= 1;
+
+        Ok(())
     }
 
     /// Insert a new range into this RangeSet.
@@ -59,13 +89,16 @@ impl RangeSet {
     /// If the range overlaps with an existing range, then the ranges will
     /// be merged. If the range has no overlap with an existing range then
     /// it will simply be added to the set.
-    pub fn insert(&mut self, mut range: Range) {
-        assert!(range.start <= range.end, "Invalid range shape");
+    pub fn insert(&mut self, mut range: Range) -> Result<()> {
+        // Check the range
+        if range.end < range.start {
+            return Err(Error::InvalidIndex);
+        }
 
         // Outside loop forever until we run out of merges with existing
         // ranges.
         'try_merges: loop {
-            for ii in 0..self.in_use as usize {
+            for ii in 0..self.in_use {
                 let ent = self.ranges[ii];
 
                 // Check for overlap with an existing range.
@@ -90,7 +123,7 @@ impl RangeSet {
                 range.end   = cmp::max(range.end,   ent.end);
 
                 // Delete the old range, as the new one is now all inclusive
-                self.delete(ii);
+                self.delete(ii)?;
 
                 // Start over looking for merges
                 continue 'try_merges;
@@ -99,12 +132,17 @@ impl RangeSet {
             break;
         }
 
-        assert!((self.in_use as usize) < self.ranges.len(),
-            "Too many entries in RangeSet on insert");
-
         // Add the new range to the end
-        self.ranges[self.in_use as usize] = range;
-        self.in_use += 1;
+        if let Some(ent) = self.ranges.get_mut(self.in_use) {
+            *ent = range;
+            self.in_use += 1;
+            Ok(())
+        } else {
+            // If we deleted anything above, it's impossible for this error to
+            // occur as we know there is space for at least one entry. Thus, we
+            // don't have to worry about restoring removed ranges from above.
+            Err(Error::OutOfEntries)
+        }
     }
 
     /// Remove `range` from the RangeSet
@@ -113,11 +151,14 @@ impl RangeSet {
     /// such that there is no more overlap. If this results in a range in
     /// the set becoming empty, the range will be removed entirely from the
     /// set.
-    pub fn remove(&mut self, range: Range) {
-        assert!(range.start <= range.end, "Invalid range shape");
+    pub fn remove(&mut self, range: Range) -> Result<()> {
+        // Check the range
+        if range.end < range.start {
+            return Err(Error::InvalidIndex);
+        }
         
         'try_subtractions: loop {
-            for ii in 0..self.in_use as usize {
+            for ii in 0..self.in_use {
                 let ent = self.ranges[ii];
 
                 // If there is no overlap, there is nothing to do with this
@@ -129,7 +170,7 @@ impl RangeSet {
                 // If this entry is entirely contained by the range to remove,
                 // then we can just delete it.
                 if contains(ent, range) {
-                    self.delete(ii);
+                    self.delete(ii)?;
                     continue 'try_subtractions;
                 }
 
@@ -153,27 +194,26 @@ impl RangeSet {
                     // we need to split it into two ranges.
                     self.ranges[ii].start = range.end.saturating_add(1);
 
-                    assert!((self.in_use as usize) < self.ranges.len(),
-                        "Too many entries in RangeSet on split");
+                    // Insert new range for the tail
+                    if let Some(ent) = self.ranges.get_mut(self.in_use) {
+                        *ent = Range {
+                            start: ent.start,
+                            end:   range.start.saturating_sub(1),
+                        };
+                        self.in_use += 1;
+                    } else {
+                        return Err(Error::OutOfEntries);
+                    }
 
-                    self.ranges[self.in_use as usize] = Range {
-                        start: ent.start,
-                        end:   range.start.saturating_sub(1),
-                    };
-                    self.in_use += 1;
                     continue 'try_subtractions;
                 }
             }
 
+            // No more subtractions could be found
             break;
         }
-    }
 
-    /// Subtracts a `RangeSet` from `self`
-    pub fn subtract(&mut self, rs: &RangeSet) {
-        for &ent in rs.entries() {
-            self.remove(ent);
-        }
+        Ok(())
     }
 
     /// Compute the size of the range covered by this rangeset
@@ -184,7 +224,7 @@ impl RangeSet {
     }
 
     /// Allocate `size` bytes of memory with `align` requirement for alignment
-    pub fn allocate(&mut self, size: u64, align: u64) -> Option<usize> {
+    pub fn allocate(&mut self, size: u64, align: u64) -> Result<usize> {
         // Allocate anywhere from the `RangeSet`
         self.allocate_prefer(size, align, None)
     }
@@ -195,15 +235,15 @@ impl RangeSet {
     /// best. If `regions` is `None`, then the allocation will be satisfied
     /// from anywhere.
     pub fn allocate_prefer(&mut self, size: u64, align: u64,
-                           regions: Option<&RangeSet>) -> Option<usize> {
+                           regions: Option<&RangeSet>) -> Result<usize> {
         // Don't allow allocations of zero size
         if size == 0 {
-            return None;
+            return Err(Error::ZeroSizeAllocation);
         }
 
         // Validate alignment is non-zero and a power of 2
         if align.count_ones() != 1 {
-            return None;
+            return Err(Error::InvalidAlignment);
         }
 
         // Generate a mask for the specified alignment
@@ -219,7 +259,14 @@ impl RangeSet {
             // Compute base and end of allocation as an inclusive range
             // [base, end]
             let base = ent.start;
-            let end  = base.checked_add(size - 1)?.checked_add(align_fix)?;
+            let end  = if let Some(end) = base.checked_add(size - 1)
+                    .and_then(|x| x.checked_add(align_fix)) {
+                end
+            } else {
+                // This range can not satisfy this allocation as there was an
+                // overflow on the range
+                continue;
+            };
 
             // Check that this entry has enough room to satisfy allocation
             if end > ent.end {
@@ -265,19 +312,26 @@ impl RangeSet {
             // Compute the "best" allocation size to date
             let prev_size = allocation.map(|(base, end, _)| end - base);
 
-            if allocation.is_none() || prev_size.unwrap() > end - base {
+            // Check if the new allocation uses less memory than the previous
+            // allocation
+            let smaller = prev_size.map(|x| end - base < x);
+
+            if allocation.is_none() || smaller == Some(true) {
                 // Update the allocation to the new best size
                 allocation = Some((base, end, (base + align_fix) as usize));
             }
         }
 
-        allocation.map(|(base, end, ptr)| {
+        if let Some((base, end, ptr)) = allocation {
             // Remove this range from the available set
-            self.remove(Range { start: base, end: end });
+            self.remove(Range { start: base, end: end })?;
             
             // Return out the pointer!
-            ptr
-        })
+            Ok(ptr)
+        } else {
+            // Couldn't satisfy allocation
+            Err(Error::OutOfMemory)
+        }
     }
 }
 

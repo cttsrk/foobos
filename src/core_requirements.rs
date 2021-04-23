@@ -14,8 +14,7 @@
 ///
 #[no_mangle]
 #[cfg(target_arch = "x86_64")]
-pub unsafe extern fn memcpy(dest: *mut u8, src: *const u8, n: usize)
-        -> *mut u8 {
+unsafe extern fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     asm!("rep movsb",
          inout("rcx") n    => _,
          inout("rdi") dest => _,
@@ -37,7 +36,7 @@ pub unsafe extern fn memcpy(dest: *mut u8, src: *const u8, n: usize)
 /// Pointer to `dest`
 ///
 #[no_mangle]
-pub unsafe extern fn memmove(dest: *mut u8, src: *const u8, mut n: usize)
+unsafe extern fn memmove(dest: *mut u8, src: *const u8, mut n: usize)
         -> *mut u8 {
     // Check if there is overlap with the source coming prior to the dest.
     // Even if there is overlap, if the destination is earlier in memory
@@ -131,7 +130,7 @@ pub unsafe extern fn memmove(dest: *mut u8, src: *const u8, mut n: usize)
 ///
 #[no_mangle]
 #[cfg(target_arch = "x86_64")]
-pub unsafe extern fn memset(s: *mut u8, c: i32, n: usize) -> *mut u8 {
+unsafe extern fn memset(s: *mut u8, c: i32, n: usize) -> *mut u8 {
     asm!("rep stosb",
          inout("rcx") n => _,
          inout("rdi") s => _,
@@ -153,7 +152,7 @@ pub unsafe extern fn memset(s: *mut u8, c: i32, n: usize) -> *mut u8 {
 /// The difference between the first unmatching byte of `s1` and `s2`, or
 /// zero if both memory regions are identical
 #[no_mangle]
-pub unsafe extern fn memcmp(s1: *const u8, s2: *const u8, n: usize)
+unsafe extern fn memcmp(s1: *const u8, s2: *const u8, n: usize)
         -> i32 {
     let mut ii = 0;
 

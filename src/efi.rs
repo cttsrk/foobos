@@ -9,7 +9,7 @@
 //! structure.
 
 use core::sync::atomic::{AtomicPtr, Ordering};
-use crate::mm::rangeset::{Range, RangeSet};
+use crate::mm::rangeset::{self, Range, RangeSet};
 
 /// A `Result` type which wraps an EFI error
 type Result<T> = core::result::Result<T, Error>;
@@ -28,6 +28,9 @@ pub enum Error {
 
     /// An integer overflow occurred when processing EFI memory map data
     MemoryMapIntegerOverflow,
+
+    /// An error occured when trying to construct the memory map `RangeSet`
+    MemoryRangeSet(rangeset::Error),
 }
 
 /// A strongly typed EFI system table pointer which will disallow the copying
@@ -211,7 +214,7 @@ pub fn get_memory_map(image_handle: EfiHandle) -> Result<RangeSet> {
                     usable_memory.insert(Range {
                         start: entry.physical_start,
                         end:   end
-                    });
+                    }).map_err(|e| Error::MemoryRangeSet(e))?;
                 }
             }
         }

@@ -1,6 +1,4 @@
-//! Memory management routines
-
-pub mod rangeset;
+//! Physical memory management for the OS
 
 use core::mem::size_of;
 
@@ -8,12 +6,25 @@ use core::mem::size_of;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PhysAddr(pub u64);
 
+impl PhysAddr {
+    /// Read a `T` from physical memory address `paddr`
+    #[inline]
+    pub unsafe fn read<T>(&self) -> T {
+        core::ptr::read(self.0 as *const T)
+    }
+
+    /// Read an unaligned `T` from physical memory address `paddr`
+    #[inline]
+    pub unsafe fn read_unaligned<T>(&self) -> T {
+        core::ptr::read_unaligned(self.0 as *const T)
+    }
+}
 
 /// A consume-able slice of physical memory
 pub struct PhysSlice(PhysAddr, usize);
 
 impl PhysSlice {
-    /// Create a new slice to physical memory
+    /// Create a new slice to physical memory at `addr` for `size` bytes
     pub unsafe fn new(addr: PhysAddr, size: usize) -> Self {
         PhysSlice(addr, size)
     }
@@ -43,7 +54,7 @@ impl PhysSlice {
         }
 
         // Read the actual data
-        let data = read_phys_unaligned::<T>(self.0);
+        let data = self.0.read_unaligned::<T>();
         
         // Update the pointer and length
         (self.0).0 += size_of::<T>() as u64;
@@ -51,16 +62,4 @@ impl PhysSlice {
         Ok(data)
         
     }
-}
-
-/// Read a `T` from physical memory address `paddr`
-#[inline]
-pub unsafe fn read_phys<T>(paddr: PhysAddr) -> T {
-    core::ptr::read(paddr.0 as *const T)
-}
-
-/// Read an unaligned `T` from physical memory address `paddr`
-#[inline]
-pub unsafe fn read_phys_unaligned<T>(paddr: PhysAddr) -> T {
-    core::ptr::read_unaligned(paddr.0 as *const T)
 }
