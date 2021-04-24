@@ -27,6 +27,9 @@ pub enum TableType {
     /// System Resource Affinity Table
     Srat,
 
+    /// Serial Port Console Redirection Table
+    Spcr,
+
     /// An unknown table type
     Unknown([u8; 4]),
 }
@@ -37,6 +40,7 @@ impl From<[u8; 4]> for TableType {
             b"XSDT" => Self::Xsdt,
             b"APIC" => Self::Madt,
             b"SRAT" => Self::Srat,
+            b"SPCR" => Self::Spcr,
                   _ => Self::Unknown(val),
         }
     }
@@ -395,7 +399,10 @@ pub unsafe fn init() -> Result<()> {
         match typ {
             TableType::Madt => {
                 Madt::from_addr(data, len)?;
-                 
+            }
+
+            TableType::Spcr => {
+                print!("We have an SPCR\n");
             }
 
             // Unknown

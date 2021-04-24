@@ -35,6 +35,14 @@ extern fn efi_main(image_handle: EfiHandle,
         // other places such as a `print!` macro
         system_table.register();
 
+        #[cfg(target_arch = "aarch64")]
+        let arch = "aarch64";
+
+        #[cfg(target_arch = "x86_64")]
+        let arch = "x86_64";
+
+        print!("\n\nFOOBOS INIT: booting {}\n\n", arch);
+
         // Initialize ACPI
         acpi::init().expect("Failed to initialize ACPI");
 
