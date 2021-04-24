@@ -2,18 +2,17 @@
 
 set -e
 
-cargo build
+cargo build --release --target aarch64-unknown-uefi.json
+
 qemu-system-aarch64 \
     -M virt \
     -smp 2 \
-    -m 128 \
-    -cpu cortex-a53 \
+    -m 1024 \
+    -cpu cortex-a57 \
     -nographic \
-    -device driver=e1000,netdev=n0 \
-    -netdev user,id=n0,tftp=target/x86_64-unknown-uefi/debug,bootfile=foobos.efi
+    -bios edk2_uefi/edk2-aarch64-code.fd \
+    -device driver=virtio-net,netdev=n0 \
+    -netdev user,id=n0,tftp=target/aarch64-unknown-uefi/release,bootfile=foobos.efi \
 
-    #2>&1 | sed \
-    #-e 's/.*DVD-ROM.*/truncated DVD-ROM msg/' \
-    #-e 's/.*CPUID.80000001H.ECX.svm.*/truncated CPUID msg/' \
-    #-e 's/BdsDxe.*/truncated netboot msg/'
-
+    #2>&1 > aarch64test.log
+    

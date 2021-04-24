@@ -154,7 +154,7 @@ impl RangeSet {
     pub fn remove(&mut self, range: Range) -> Result<()> {
         // Check the range
         if range.end < range.start {
-            return Err(Error::InvalidIndex);
+            return Err(Error::InvalidRange);
         }
         
         'try_subtractions: loop {

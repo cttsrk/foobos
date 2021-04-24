@@ -24,7 +24,6 @@ fn panic(info: &PanicInfo) -> ! {
     }
 
     loop {
-        unsafe { asm!("hlt"); }
     }
 }
 
@@ -54,3 +53,6 @@ extern fn efi_main(image_handle: EfiHandle,
 
     loop {}
 }
+
+#[no_mangle]
+fn __chkstk() {}

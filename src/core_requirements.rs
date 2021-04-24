@@ -23,6 +23,33 @@ unsafe extern fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     dest
 }
 
+/// libc `memcpy` implementation in Rust
+///
+/// # Parameters
+///
+/// * `dest` - Pointer to memory to copy to
+/// * `src`  - Pointer to memory to copy from
+/// * `n`    - Number of bytes to copy
+///
+/// # Returns
+///
+/// Pointer to `dest`
+///
+#[no_mangle]
+#[cfg(not(target_arch = "x86_64"))]
+unsafe extern fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+    let mut ii = 0;
+
+    while ii < n {
+        let dest = dest.offset(ii as isize);
+        let src  = src.offset(ii as isize);
+        core::ptr::write(dest, core::ptr::read(src));
+        ii += 1;
+    }
+
+    dest
+}
+
 /// libc `memmove` implementation in Rust
 ///
 /// # Parameters
@@ -136,6 +163,32 @@ unsafe extern fn memset(s: *mut u8, c: i32, n: usize) -> *mut u8 {
          inout("rdi") s => _,
          in("eax")    c as u32);
 
+    s
+}
+
+/// libc `memset` implementation in Rust
+///
+/// # Parameters
+///
+/// * `s` - Pointer to memory to set
+/// * `c` - Character to set bytes to
+/// * `n` - Number of bytes to set
+///
+/// # Returns
+///
+/// Original pointer to `s`
+///
+#[no_mangle]
+#[cfg(not(target_arch = "x86_64"))]
+unsafe extern fn memset(s: *mut u8, c: i32, n: usize) -> *mut u8 {
+    let mut ii = 0;
+
+    while ii < n {
+        let s = s.offset(ii as isize);
+        core::ptr::write(s, c as u8);
+        ii += 1;
+    }
+    
     s
 }
 
