@@ -9,11 +9,11 @@ assembler inclusions, no third party dependencies at runtime, support for
 
 # Building
 
-## Requirements
+### Requirements
 
 To build this, you need Rust beta or nightly toolchain.
 
-## Building
+### Building
 
 To build x86, just run `cargo build`.
 
