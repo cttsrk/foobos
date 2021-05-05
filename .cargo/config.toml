@@ -26,3 +26,11 @@ rustflags = """
     -C code-model=small
 """
 
+[target.riscv64-unknown-uefi]
+rustflags = """
+    -C link-arg=/base:0x13370000
+    -C link-args=/debug:dwarf
+    -C relocation-model=static
+    -C code-model=small
+"""
+

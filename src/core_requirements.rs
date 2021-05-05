@@ -1,5 +1,7 @@
 //! This holds the libcore basic requirements for things like libc routines
 
+use core::mem::size_of;
+
 /// libc `memcpy` implementation in Rust
 ///
 /// # Parameters
@@ -87,16 +89,17 @@ unsafe extern fn memmove(dest: *mut u8, src: *const u8, mut n: usize)
         // If the non-overlapping region is quite small, don't even bother
         // doing forward based chunk copies, just copy in reverse
         if overhang < 64 {
-            // 8-byte align the dest with one byte copies
-            while n != 0 && (dest as usize).wrapping_add(n) & 0x7 != 0 {
+            // `u64`-align the dest with one byte copies
+            while n != 0 && (dest as usize)
+                    .wrapping_add(n) & (size_of::<u64>() - 1) != 0 {
                 n = n.wrapping_sub(1);
                 core::ptr::write(dest.offset(n as isize),
                     core::ptr::read(src.offset(n as isize)));
             }
 
-            // Do a reverse copy 8 bytes at a time
-            while n >= 8 {
-                n = n.wrapping_sub(8);
+            // Do a reverse copy one `u64` at a time
+            while n >= size_of::<u64>() {
+                n = n.wrapping_sub(size_of::<u64>());
 
                 // Read the value to copy
                 let val = core::ptr::read_unaligned(

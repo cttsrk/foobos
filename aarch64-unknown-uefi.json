@@ -11,7 +11,7 @@
   "executables": true,
   "is-builtin": true,
   "linker": "rust-lld",
-  "linker-flavor": "lld-link",
+  "linker-flavor": "ld64.lld",
   "lld-flavor": "link",
   "llvm-target": "aarch64-unknown-windows",
   "max-atomic-width": 64,

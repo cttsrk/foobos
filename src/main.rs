@@ -1,3 +1,4 @@
+//! Main bootlader entry for foobOS
 #![feature(asm, panic_info_message, bool_to_option)]
 #![no_std]
 #![no_main]
@@ -12,21 +13,28 @@ use core::panic::PanicInfo;
 
 use crate::efi::{EfiHandle, EfiSystemTablePtr, EfiStatusCode};
 
+/// Entry point for panics
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     print!("!!! PANIC !!!\n");
+
+    // Print the location if there is one
     if let Some(location) = info.location() {
         print!("{}:{}:{}\n",
             location.file(), location.line(), location.column());
     }
+
+    // Print the panic message
     if let Some(message) = info.message() {
         print!("{}\n", message);
     }
 
+    // Loop forever
     loop {
     }
 }
 
+/// EFI entry point
 #[no_mangle]
 extern fn efi_main(image_handle: EfiHandle,
                    system_table: EfiSystemTablePtr) -> EfiStatusCode {
@@ -39,6 +47,7 @@ extern fn efi_main(image_handle: EfiHandle,
         // std::env::consts::ARCH
         #[cfg(target_arch = "aarch64")] let arch = "aarch64";
         #[cfg(target_arch = "x86_64")]  let arch = "x86_64";
+        #[cfg(target_arch = "riscv64")] let arch = "riscv64";
         print!("\n\nFOOBOS INIT: booting {}\n\n\n", arch);
 
         // Initialize ACPI

@@ -8,6 +8,7 @@
 //! complex type as `usize`, if we don't actually have a use for this
 //! structure.
 
+use core::mem::size_of;
 use core::sync::atomic::{AtomicPtr, Ordering};
 use crate::mm::rangeset::{self, Range, RangeSet};
 
@@ -20,8 +21,15 @@ pub enum Error {
     /// The EFI system table has not been registered
     NotRegistered,
 
+    /// EFI did not report a valid ACPI table
+    AcpiTableNotFound,
+
     /// We failed to get the memory map from EFI
     MemoryMap(EfiStatus),
+
+    /// The memory map returned from EFI did not fit within the bounds that it
+    /// was reported to
+    MemoryMapOutOfBounds,
 
     /// We failed to exit EFI boot services
     ExitBootServices(EfiStatus),
@@ -41,11 +49,12 @@ pub struct EfiSystemTablePtr(*mut EfiSystemTable);
 impl EfiSystemTablePtr {
     /// Register this system table into a global so it can be used for prints
     /// which do not take a `self` or a pointer as an argument and thus this
-    /// must be able to be found on a pointer
+    /// must be able to be found in a global
     pub unsafe fn register(self) {
-        EFI_SYSTEM_TABLE.compare_and_swap(
+        let _ = EFI_SYSTEM_TABLE.compare_exchange(
             core::ptr::null_mut(),
             self.0,
+            Ordering::SeqCst,
             Ordering::SeqCst);
     }
 }
@@ -60,12 +69,12 @@ static EFI_SYSTEM_TABLE: AtomicPtr<EfiSystemTable> =
     AtomicPtr::new(core::ptr::null_mut());
 
 /// Write a `string` to the UEFI console output
-pub fn output_string(string: &str) {
+pub fn output_string(string: &str) -> Result<()> {
     // Get the system_table
     let st = EFI_SYSTEM_TABLE.load(Ordering::SeqCst);
 
     // We can't do anything if it's null
-    if st.is_null() { return; }
+    if st.is_null() { return Err(Error::NotRegistered); }
 
     // Get the console out pointer
     let out = unsafe { (*st).console_out };
@@ -117,11 +126,13 @@ pub fn output_string(string: &str) {
 
         unsafe { ((*out).output_string)(out, tmp.as_ptr()); }
     }
+
+    Ok(())
 }
 
 /// Get the base of the ACPI table RSDP. If EFI did not report an ACPI table
 /// then we return `None`.
-pub fn get_acpi_table() -> Option<usize> {
+pub fn get_acpi_table() -> Result<usize> {
     /// ACPI 2.0 or newer tables should use EFI_ACPI_TABLE_GUID
     const EFI_ACPI_TABLE_GUID: EfiGuid = EfiGuid(
         0x8868e871, 0xe4f1, 0x11d3,
@@ -136,7 +147,7 @@ pub fn get_acpi_table() -> Option<usize> {
     let st = EFI_SYSTEM_TABLE.load(Ordering::SeqCst);
 
     // We can't do anything if it's null
-    if st.is_null() { return None; }
+    if st.is_null() { return Err(Error::NotRegistered); }
 
     // Get a Rust slice to the tables
     let tables = unsafe {
@@ -153,7 +164,7 @@ pub fn get_acpi_table() -> Option<usize> {
         tables.iter().find_map(|EfiConfigurationTable { guid, table }| {
             (guid == &ACPI_TABLE_GUID).then_some(*table)
         })
-    })
+    }).ok_or(Error::AcpiTableNotFound)
 }
 
 /// Get the memory map for the system from the UEFI
@@ -194,7 +205,11 @@ pub fn get_memory_map(image_handle: EfiHandle) -> Result<RangeSet> {
         for off in (0..size).step_by(mdesc_size) {
             // Read the memory as a descriptor
             let entry = core::ptr::read_unaligned(
-                memory_map[off..].as_ptr() as *const EfiMemoryDescriptor);
+                memory_map.get(off..)
+                    .ok_or(Error::MemoryMapOutOfBounds)?
+                    .get(..off + size_of::<EfiMemoryDescriptor>())
+                    .ok_or(Error::MemoryMapOutOfBounds)?
+                    .as_ptr() as *const EfiMemoryDescriptor);
 
             // Convert the type into our Rust enum
             let typ: EfiMemoryType = entry.typ.into();
@@ -626,11 +641,12 @@ struct EfiBootServices {
     _free_pages: usize,
 
     /// Returns the current boot service memory map and memory map key
-    get_memory_map: unsafe fn(memory_map_size:    &mut usize,
-                              memory_map:         *mut u8,
-                              map_key:            &mut usize,
-                              descriptor_size:    &mut usize,
-                              descriptor_version: &mut u32) -> EfiStatusCode,
+    get_memory_map: unsafe extern fn(memory_map_size:    &mut usize,
+                                     memory_map:         *mut u8,
+                                     map_key:            &mut usize,
+                                     descriptor_size:    &mut usize,
+                                     descriptor_version: &mut u32)
+                                         -> EfiStatusCode,
 
     /// Allocates a pool of a particular type
     _allocate_pool: usize,
@@ -700,8 +716,8 @@ struct EfiBootServices {
     _unload_image: usize,
 
     /// Terminates boot services
-    exit_boot_services: unsafe fn(image_handle: EfiHandle,
-                                  map_key:      usize) -> EfiStatusCode,
+    exit_boot_services: unsafe extern fn(image_handle: EfiHandle,
+                                         map_key: usize) -> EfiStatusCode,
 }
 
 /// This protocol is used to obtain input from the ConsoleIn device. The
@@ -711,12 +727,12 @@ struct EfiBootServices {
 #[repr(C)]
 struct EfiSimpleTextInputProtocol {
     /// Resets the input device hardware
-    reset: unsafe fn(this: *const EfiSimpleTextInputProtocol,
-                     extended_verification: bool) -> EfiStatusCode,
+    reset: unsafe extern fn(this: *const EfiSimpleTextInputProtocol,
+                            extended_verification: bool) -> EfiStatusCode,
     
     /// Reads the next keystroke from the input device
-    read_keystroke: unsafe fn(this: *const EfiSimpleTextInputProtocol,
-                              key:  *mut   EfiInputKey) -> EfiStatusCode,
+    read_keystroke: unsafe extern fn(this: *const EfiSimpleTextInputProtocol,
+                                     key: *mut EfiInputKey) -> EfiStatusCode,
 
     /// Event to use with `EFI_BOOT_SERVICES.WaitForEvent()` to wait for a
     /// key to be available.
@@ -728,17 +744,17 @@ struct EfiSimpleTextInputProtocol {
 #[repr(C)]
 struct EfiSimpleTextOutputProtocol {
     /// Resets the text output device hardware
-    reset: unsafe fn(this: *const EfiSimpleTextOutputProtocol,
-                     extended_verification: bool) -> EfiStatusCode,
+    reset: unsafe extern fn(this: *const EfiSimpleTextOutputProtocol,
+                            extended_verification: bool) -> EfiStatusCode,
 
     /// Writes a string to the output device.
-    output_string: unsafe fn(this:   *const EfiSimpleTextOutputProtocol,
-                             string: *const u16) -> EfiStatusCode,
+    output_string: unsafe extern fn(this:   *const EfiSimpleTextOutputProtocol,
+                                    string: *const u16) -> EfiStatusCode,
 
     /// Verifies that all characters in a string can be output to the
     /// target device
-    test_string: unsafe fn(this:   *const EfiSimpleTextOutputProtocol,
-                           string: *const u16) -> EfiStatusCode,
+    test_string: unsafe extern fn(this:   *const EfiSimpleTextOutputProtocol,
+                                  string: *const u16) -> EfiStatusCode,
 
     /// Returns information for an available text mode that the output
     /// device(s) support

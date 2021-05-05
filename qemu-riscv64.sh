@@ -2,11 +2,11 @@
 
 set -e
 
-cargo build --target x86_64-unknown-uefi
+cargo build --target riscv64gc-unknown-uefi.json
 
-qemu-system-x86_64 \
+qemu-system-risvc64 \
+    -machine virt \
     -smp 2 \
-    -accel hvf \
     -m 512 \
     -nographic \
     -bios ovmf-x64/OVMF_CODE-pure-efi.fd \

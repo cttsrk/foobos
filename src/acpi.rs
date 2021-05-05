@@ -35,6 +35,7 @@ pub enum TableType {
 }
 
 impl From<[u8; 4]> for TableType {
+    /// Convert from an ACPI table string into an enum
     fn from(val: [u8; 4]) -> Self {
         match &val {
             b"XSDT" => Self::Xsdt,
@@ -49,9 +50,8 @@ impl From<[u8; 4]> for TableType {
 /// Errors from ACPI table parsing
 #[derive(Debug)]
 pub enum Error {
-    /// The ACPI table address was not reported by UEFI and thus we could
-    /// not find the RSDP
-    RsdpNotFound,
+    /// An EFI API returned an error
+    EfiError(efi::Error),
 
     /// An RSDP table was processed, which had an invalid checksum
     ChecksumMismatch(TableType),
@@ -81,7 +81,7 @@ unsafe fn checksum(addr: PhysAddr, size: usize, typ: TableType) -> Result<()> {
     let chk = (0..size as u64).try_fold(0u8, |acc, offset| {
         Ok(acc.wrapping_add(
             PhysAddr(addr.0.checked_add(offset)
-                .ok_or(Error::IntegerOverflow)?).read::<u8>()))
+                .ok_or(Error::IntegerOverflow)?).read_unaligned::<u8>()))
     })?;
 
     // Validate checksum
@@ -126,7 +126,7 @@ impl Rsdp {
         checksum(addr, size_of::<Self>(), TableType::Rsdp)?;
 
         // Get the RSDP table
-        let rsdp = addr.read::<Self>();
+        let rsdp = addr.read_unaligned::<Self>();
 
         // Check the signature
         if &rsdp.signature != b"RSD PTR " {
@@ -176,7 +176,7 @@ impl RsdpExtended {
         checksum(addr, size_of::<Self>(), TableType::Rsdp)?;
 
         // Get the extended RSDP table
-        let rsdp = addr.read::<Self>();
+        let rsdp = addr.read_unaligned::<Self>();
 
         // Check the size
         if rsdp.length as usize != size_of::<Self>() {
@@ -238,7 +238,7 @@ impl Table {
     unsafe fn from_addr(addr: PhysAddr)
             -> Result<(Self, TableType, PhysAddr, usize)> {
         // Read the table
-        let table = addr.read::<Self>();
+        let table = addr.read_unaligned::<Self>();
 
         // Get the type of this table
         let typ = TableType::from(table.signature);
@@ -313,6 +313,7 @@ impl Madt {
                         return Err(E);
                     }
                     
+                    // Get the `LocalApic` information
                     let apic = slice.consume::<LocalApic>().map_err(|_| E)?;
 
                     print!("{:#x?}\n", apic);
@@ -345,7 +346,9 @@ impl Madt {
                         return Err(E);
                     }
                     
+                    // Get the `LocalX2Apic` information
                     let apic = slice.consume::<LocalX2Apic>().map_err(|_| E)?;
+
                     print!("{:#x?}\n", apic);
                 }
                 _ => {
@@ -362,7 +365,7 @@ impl Madt {
 /// Initialize the ACPI subsystem
 pub unsafe fn init() -> Result<()> {
     // Get the ACPI table base from the EFI
-    let rsdp_addr = efi::get_acpi_table().ok_or(Error::RsdpNotFound)?;
+    let rsdp_addr = efi::get_acpi_table().map_err(|e| Error::EfiError(e))?;
     
     // Validate and get the RSDP
     let rsdp = RsdpExtended::from_addr(PhysAddr(rsdp_addr as u64))?;

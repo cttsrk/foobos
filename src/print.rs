@@ -1,15 +1,14 @@
 //! This file handles the `print!()` macro which allows displaying
 //! information to the UEFI standard out console
 
-use core::fmt::{Result, Write};
+use core::fmt::{Result, Write, Error};
 
 /// A dummy screen writing structure we can implement `Write` on
 pub struct ScreenWriter;
 
 impl Write for ScreenWriter {
     fn write_str(&mut self, string: &str) -> Result {
-        crate::efi::output_string(string);
-        Ok(())
+        crate::efi::output_string(string).map_err(|_| Error)
     }
 }
 
