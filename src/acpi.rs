@@ -2,6 +2,7 @@
 //! about CPU topography and NUMA memory regions
 
 use core::mem::size_of;
+use core::convert::TryInto;
 
 use crate::mm::physmem::{PhysAddr, PhysSlice};
 use crate::efi;
@@ -61,6 +62,32 @@ pub enum Error {
 
     /// An ACPI table did not match the expected length
     LengthMismatch(TableType),
+
+    /// A register bit width specified by a Generic Address Structure was zero
+    GasWidthZero,
+
+    /// A register bit width specified by a Generic Address Structure was not
+    /// divisible by 8
+    GasWidthNotMod8,
+
+    /// A register bit offset was non-zero, this is allowed by the spec but is
+    /// not supposed to happen on architectures supported by this OS
+    GasOffsetNonZero,
+
+    /// An integer overflow occurred when computing a Generic Address Structure
+    /// offset
+    GasAddressOverflow,
+
+    /// A Generic Address Structure with an unimplemented type, not supported
+    GasTypeUnimplemented,
+
+    /// An access size was not specified by a Generic Address Structure and we
+    /// were unable to satisfy the operation
+    GasInvalidAccessSize,
+
+    /// An I/O port address was specified in a Generic Address Structure and
+    /// I/O ports are not supported on this architecture
+    GasIoPortNotAvailable,
 
     /// An attempt was made to access the extended RSDP but the ACPI
     /// revision of this system is too old and does not support it. ACPI
@@ -362,6 +389,537 @@ impl Madt {
     }
 }
 
+/// Different types of serial devices
+#[derive(Debug)]
+enum SerialInterface {
+    /// Full 16550 interface
+    Serial16550,
+
+    /// Full 16450 interface (must also accept writing to the 16550 FCR
+    /// register)
+    Serial16450,
+
+    /// MAX311xxE SPI UART
+    Max311,
+
+    /// ARM PL011 UART
+    ArmPL011,
+
+    /// MSM8x60 (e.g. 8960)
+    Msm8x60,
+
+    /// Nvidia 16550
+    Nvidia16550,
+
+    /// TI OMAP
+    TiOmap,
+
+    /// APM88xxxx
+    Apm88xxxx,
+
+    /// MSM8974
+    Msm8974,
+
+    /// SAM5250
+    Sam5250,
+
+    /// Intel USIF
+    IntelUsif,
+
+    /// i.MX 6
+    IMX6,
+
+    /// (deprecated) ARM SBSA (2.x only) Generic UART supporting only 32-bit
+    /// accesses
+    ArmSbsa32,
+
+    /// ARM SBSA Generic UART
+    ArmSbsa,
+
+    /// ARM DCC
+    ArmDcc,
+
+    /// BCM2835
+    Bcm2835,
+
+    /// SDM845 with a clock rate of 1.8432 MHz
+    Sdm845_18432,
+    
+    /// 16550-compatible with parameters defined in Generic Address Structure
+    Serial16550Gas,
+
+    /// SDM845 with a clock rate of 7.362 MHz
+    Sdm845_7362,
+
+    /// Intel LPSS
+    IntelLpss,
+
+    /// Unknown serial interface
+    Unknown(u8),
+}
+
+impl From<u8> for SerialInterface {
+    fn from(val: u8) -> Self {
+        match val {
+             0 => Self::Serial16550,
+             1 => Self::Serial16450,
+             2 => Self::Max311,
+             3 => Self::ArmPL011,
+             4 => Self::Msm8x60,
+             5 => Self::Nvidia16550,
+             6 => Self::TiOmap,
+             8 => Self::Apm88xxxx,
+             9 => Self::Msm8974,
+            10 => Self::Sam5250,
+            11 => Self::IntelUsif,
+            12 => Self::IMX6,
+            13 => Self::ArmSbsa32,
+            14 => Self::ArmSbsa,
+            15 => Self::ArmDcc,
+            16 => Self::Bcm2835,
+            17 => Self::Sdm845_18432,
+            18 => Self::Serial16550Gas,
+            19 => Self::Sdm845_7362,
+            20 => Self::IntelLpss,
+             _ => Self::Unknown(val),
+        }
+    }
+}
+
+/// An acess size for an ACPI Generaic Access Structure
+#[derive(Debug, Clone, Copy)]
+enum AccessSize {
+    /// Undefined (legacy reasons)
+    Undefined,
+
+    /// Byte access
+    Byte,
+
+    /// Word access
+    Word,
+
+    /// Dword access
+    Dword,
+
+    /// Qword access
+    Qword,
+
+    /// Not defined by the spec
+    Unspecified,
+}
+
+impl From<u8> for AccessSize {
+    fn from(val: u8) -> Self {
+        match val {
+            0 => Self::Undefined,
+            1 => Self::Byte,
+            2 => Self::Word,
+            3 => Self::Dword,
+            4 => Self::Qword,
+            _ => Self::Unspecified,
+        }
+    }
+}
+
+/// An I/O port address
+#[derive(Clone, Copy, Debug)]
+struct IoAddr(pub u64);
+
+impl IoAddr {
+    /// Read a value from an I/O port
+    unsafe fn read_u8(&self) -> Result<u8> {
+        {
+            let val: u8;
+            #[cfg(target_arch = "x86_64")]
+            asm!("in al, dx", out("al") val, in("dx") self.0,
+                options(nomem, nostack, preserves_flags));
+
+            #[cfg(target_arch = "aarch64")]
+            asm!("ldrb w0, [x1]", out("w0") val, in("x1") self.0,
+                options(nomem, nostack, preserves_flags));
+
+            Ok(val)
+        }
+
+        #[cfg(target_arch = "risvc64")]
+        Err(Error::GasIoPortNotAvailable)
+    }
+
+    /// Read a value from an I/O port
+    unsafe fn read_u16(&self) -> Result<u16> {
+        {
+            let val: u16;
+            #[cfg(target_arch = "x86_64")]
+            asm!("in ax, dx", out("ax") val, in("dx") self.0,
+                options(nomem, nostack, preserves_flags));
+
+            #[cfg(target_arch = "aarch64")]
+            asm!("ldrh w0, [x1]", out("w0") val, in("x1") self.0,
+                options(nomem, nostack, preserves_flags));
+
+            Ok(val)
+        }
+
+        #[cfg(target_arch = "risvc64")]
+        Err(Error::GasIoPortNotAvailable)
+    }
+
+    /// Read a value from an I/O port
+    unsafe fn read_u32(&self) -> Result<u32> {
+        {
+            let val: u32;
+            #[cfg(target_arch = "x86_64")]
+            asm!("in eax, dx", out("eax") val, in("dx") self.0,
+                options(nomem, nostack, preserves_flags));
+
+            #[cfg(target_arch = "aarch64")]
+            asm!("ldr w0, [x1]", out("w0") val, in("x1") self.0,
+                options(nomem, nostack, preserves_flags));
+
+            Ok(val)
+        }
+
+        #[cfg(target_arch = "risvc64")]
+        Err(Error::GasIoPortNotAvailable)
+    }
+
+    /// Read a value from an I/O port
+    unsafe fn read_u64(&self) -> Result<u64> {
+        {
+            let val: u64;
+            #[cfg(target_arch = "x86_64")]
+            asm!("in rax, dx", out("rax") val, in("dx") self.0,
+                options(nomem, nostack, preserves_flags));
+
+            #[cfg(target_arch = "aarch64")]
+            asm!("ldr x0, [x1]", out("x0") val, in("x1") self.0,
+                options(nomem, nostack, preserves_flags));
+
+            Ok(val)
+        }
+
+        #[cfg(target_arch = "risvc64")]
+        Err(Error::GasIoPortNotAvailable)
+    }
+
+    /// Write a `val` to the I/O port
+    unsafe fn write_u8(&self, val: u8) -> Result<()> {
+        {
+            #[cfg(target_arch = "x86_64")]
+            asm!("out dx, al", in("dx") self.0, in("al") val,
+                options(nomem, nostack, preserves_flags));
+
+            #[cfg(target_arch = "aarch64")]
+            asm!("strb w0, [x1]", in("w0") val as u32, in("x1") self.0,
+                options(nomem, nostack, preserves_flags));
+
+            Ok(())
+        }
+
+        #[cfg(target_arch = "risvc64")]
+        Err(Error::GasIoPortNotAvailable)
+    }
+
+    /// Write a `val` to the I/O port
+    unsafe fn write_u16(&self, val: u16) -> Result<()> {
+        {
+            #[cfg(target_arch = "x86_64")]
+            asm!("out dx, ax", in("dx") self.0, in("ax") val,
+                options(nomem, nostack, preserves_flags));
+
+            #[cfg(target_arch = "aarch64")]
+            asm!("strh w0, [x1]", in("w0") val as u32, in("x1") self.0,
+                options(nomem, nostack, preserves_flags));
+
+            Ok(())
+        }
+
+        #[cfg(target_arch = "risvc64")]
+        Err(Error::GasIoPortNotAvailable)
+    }
+
+    /// Write a `val` to the I/O port
+    unsafe fn write_u32(&self, val: u32) -> Result<()> {
+        {
+            #[cfg(target_arch = "x86_64")]
+            asm!("out dx, eax", in("dx") self.0, in("eax") val,
+                options(nomem, nostack, preserves_flags));
+
+            #[cfg(target_arch = "aarch64")]
+            asm!("str w0, [x1]", in("w0") val as u32, in("x1") self.0,
+                options(nomem, nostack, preserves_flags));
+
+            Ok(())
+        }
+
+        #[cfg(target_arch = "risvc64")]
+        Err(Error::GasIoPortNotAvailable)
+    }
+
+    /// Write a `val` to the I/O port
+    unsafe fn write_u64(&self, val: u64) -> Result<()> {
+        {
+            #[cfg(target_arch = "x86_64")]
+            asm!("out dx, rax", in("dx") self.0, in("rax") val,
+                options(nomem, nostack, preserves_flags));
+
+            #[cfg(target_arch = "aarch64")]
+            asm!("str x0, [x1]", in("x0") val as u64, in("x1") self.0,
+                options(nomem, nostack, preserves_flags));
+
+            Ok(())
+        }
+
+        #[cfg(target_arch = "risvc64")]
+        Err(Error::GasIoPortNotAvailable)
+    }
+}
+
+/// An ACPI Generic Access Structure
+#[derive(Debug)]
+enum Gas {
+    /// An address in system memory space
+    Memory {
+        /// Base address
+        addr: PhysAddr,
+
+        /// Width of a register (in bits) (i.e. the stride to access indices)
+        register_width: u8,
+
+        /// Register offset (in bits)
+        register_offset: u8,
+
+        /// Access size
+        access_size: AccessSize,
+    },
+
+    /// An address in system I/O space
+    Io {
+        /// Base I/O address
+        addr: IoAddr,
+
+        /// Width of a register (in bits) (i.e. the stride to access indices)
+        register_width: u8,
+
+        /// Register offset (in bits)
+        register_offset: u8,
+
+        /// Access size
+        access_size: AccessSize,
+    },
+
+    /// An unimplemented `Gas` type
+    Unimplemented,
+}
+
+/// An abbreviated format for a `Gas` which has been indexed and checked
+enum GasType {
+    /// An address in system memory space
+    Memory {
+        /// Address
+        addr: PhysAddr, 
+        /// Access size
+        access_size: AccessSize
+    },
+
+    /// An address in system I/O space
+    Io {
+        /// I/O address
+        addr: IoAddr,
+
+        /// Access size
+        access_size: AccessSize
+    },
+}
+
+impl GasType {
+    /// Read a value from the location specified by `self`
+    unsafe fn read(&self) -> Result<u64> {
+        Ok(match self {
+            Self::Io { addr, access_size } => {
+                // Perform the write
+                match access_size {
+                    AccessSize::Byte  => addr.read_u8()?  as u64,
+                    AccessSize::Word  => addr.read_u16()? as u64,
+                    AccessSize::Dword => addr.read_u32()? as u64,
+                    AccessSize::Qword => addr.read_u64()? as u64,
+                    _ => return Err(Error::GasInvalidAccessSize),
+                }
+            },
+            Self::Memory { addr, access_size } => {
+                // Perform the write
+                match access_size {
+                    AccessSize::Byte  => addr.read::<u8>()  as u64,
+                    AccessSize::Word  => addr.read::<u16>() as u64,
+                    AccessSize::Dword => addr.read::<u32>() as u64,
+                    AccessSize::Qword => addr.read::<u64>() as u64,
+                    _ => return Err(Error::GasInvalidAccessSize),
+                }
+            },
+            _ => panic!(),
+        })
+    }
+
+    /// Write a `val` to the location specified by `self`
+    unsafe fn write(&self, val: u64) -> Result<()> {
+        Ok(match self {
+            Self::Io { addr, access_size } => {
+                // Perform the write
+                match access_size {
+                    AccessSize::Byte  => addr.write_u8( val as u8)?,
+                    AccessSize::Word  => addr.write_u16(val as u16)?,
+                    AccessSize::Dword => addr.write_u32(val as u32)?,
+                    AccessSize::Qword => addr.write_u64(val as u64)?,
+                    _ => return Err(Error::GasInvalidAccessSize),
+                }
+            },
+            Self::Memory { addr, access_size } => {
+                // Perform the write
+                match access_size {
+                    AccessSize::Byte  => addr.write(val as u8),
+                    AccessSize::Word  => addr.write(val as u16),
+                    AccessSize::Dword => addr.write(val as u32),
+                    AccessSize::Qword => addr.write(val as u64),
+                    _ => return Err(Error::GasInvalidAccessSize),
+                }
+            },
+            _ => panic!(),
+        })
+    }
+}
+
+impl Gas {
+    /// Reads a `val` based on the `self` at the register index `idx`
+    unsafe fn read(&self, idx: usize) -> Result<u64> {
+        self.addr(idx)?.read()
+    }
+
+    /// Writes `val` to offset `idx` at the register specified by `self`.
+    /// The `val` will be truncated to the size of the register specified by
+    /// the `Gas`.
+    unsafe fn write(&self, idx: usize, val: u64) -> Result<()> {
+        self.addr(idx)?.write(val)
+    }
+
+    /// Compute the address to access the register associated with this `Gas`
+    /// based on the `idx`
+    fn addr(&self, idx: usize) -> Result<GasType> {
+        Ok(match self {
+            Self::Io { addr, register_width,
+                       register_offset, access_size} => {
+                // Check the sanity of the register
+                if *register_width == 0 {
+                    return Err(Error::GasWidthZero);
+                }
+                if *register_width % 8 != 0 {
+                    return Err(Error::GasWidthNotMod8);
+                }
+                if *register_offset != 0 {
+                    return Err(Error::GasOffsetNonZero);
+                }
+
+                // Compute the address of the register to access
+                let addr = IoAddr(
+                    (idx as u64).checked_mul((register_width / 8) as u64)
+                    .and_then(|x| x.checked_add(addr.0))
+                    .ok_or(Error::GasAddressOverflow)?);
+
+                GasType::Io { addr, access_size: *access_size }
+            }
+            Self::Memory { addr, register_width,
+                           register_offset, access_size} => {
+                // Check the sanity of the register
+                if *register_width == 0 {
+                    return Err(Error::GasWidthZero);
+                }
+                if *register_width % 8 != 0 {
+                    return Err(Error::GasWidthNotMod8);
+                }
+                if *register_offset != 0 {
+                    return Err(Error::GasOffsetNonZero);
+                }
+
+                // Compute the address of the register to access
+                let addr = PhysAddr(
+                    (idx as u64).checked_mul((register_width / 8) as u64)
+                    .and_then(|x| x.checked_add(addr.0))
+                    .ok_or(Error::GasAddressOverflow)?);
+
+                GasType::Memory { addr, access_size: *access_size }
+            }
+
+            Self::Unimplemented => {
+                return Err(Error::GasTypeUnimplemented);
+            }
+        })
+    }
+}
+
+impl From<[u8; 12]> for Gas {
+    fn from(val: [u8; 12]) -> Self {
+        match val[0] {
+            0 => Self::Memory {
+                addr: PhysAddr(u64::from_le_bytes(
+                    val[4..12].try_into().unwrap())),
+                register_width:  val[1],
+                register_offset: val[2],
+                access_size:     val[3].into(),
+            },
+            1 => Self::Io {
+                addr: IoAddr(u64::from_le_bytes(
+                    val[4..12].try_into().unwrap())),
+                register_width:  val[1],
+                register_offset: val[2],
+                access_size: val[3].into(),
+            },
+            _ => Self::Unimplemented,
+        }
+    }
+}
+
+/// The Serial Port Console Redirection table
+#[derive(Debug)]
+struct Spcr {
+    /// Type of the serial port register interface
+    interface_type: SerialInterface,
+
+    /// Address to access the serial port
+    address: Gas,
+}
+
+impl Spcr {
+    /// Process the payload of an SPCR based on a physical address and a size
+    unsafe fn from_addr(addr: PhysAddr, size: usize) -> Result<Self> {
+        /// The error type to throw when the SPCR is truncated
+        const E: Error = Error::LengthMismatch(TableType::Spcr);
+
+        // Create a slice to the physical memory
+        let mut slice = PhysSlice::new(addr, size);
+
+        // Get the serial interface type
+        let typ: SerialInterface =
+            slice.consume::<u8>().map_err(|_| E)?.into();
+
+        // Reserved (3 bytes)
+        slice.discard(3).map_err(|_| E)?;
+
+        // The generic address structure
+        let info: Gas = slice.consume::<[u8; 12]>().map_err(|_| E)?.into();
+
+        if let SerialInterface::Serial16550 = typ {
+            for _ in 0..10 {
+                // Wait for the output buffer to be ready
+                while info.read(5)? & 0x20 == 0 {}
+                info.write(0, 0x41)?;
+            }
+        }
+
+        Ok(Self {
+            interface_type: typ,
+            address: info,
+        })
+    }
+}
 /// Initialize the ACPI subsystem
 pub unsafe fn init() -> Result<()> {
     // Get the ACPI table base from the EFI
@@ -405,7 +963,9 @@ pub unsafe fn init() -> Result<()> {
             }
 
             TableType::Spcr => {
-                print!("We have an SPCR\n");
+                let spcr = Spcr::from_addr(data, len)?;
+                print!("{:#x?}\n", spcr);
+
             }
 
             // Unknown

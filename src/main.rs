@@ -48,7 +48,7 @@ extern fn efi_main(image_handle: EfiHandle,
         #[cfg(target_arch = "aarch64")] let arch = "aarch64";
         #[cfg(target_arch = "x86_64")]  let arch = "x86_64";
         #[cfg(target_arch = "riscv64")] let arch = "riscv64";
-        print!("\n\nFOOBOS INIT: booting {}\n\n\n", arch);
+        print!("\nFoobOS/{} boot\n\n", arch);
 
         // Initialize ACPI
         acpi::init().expect("Failed to initialize ACPI");
@@ -60,7 +60,7 @@ extern fn efi_main(image_handle: EfiHandle,
         let addr = mm.allocate(1024 * 1024, 4096).unwrap();
         print!("Allocated {:#x}\n", addr);
 
-        print!("{:#x?}\n", mm.entries());
+        // print!("{:#x?}\n", mm.entries());
         print!("Physical free: {}\n", mm.sum().unwrap());
 
         print!("EFI MAIN {:#x}\n", efi_main as usize);
