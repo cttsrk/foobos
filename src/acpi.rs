@@ -904,14 +904,34 @@ impl Spcr {
         slice.discard(3).map_err(|_| E)?;
 
         // The generic address structure
-        let info: Gas = slice.consume::<[u8; 12]>().map_err(|_| E)?.into();
+        let mut info: Gas = slice.consume::<[u8; 12]>().map_err(|_| E)?.into();
 
+        // Sometimes the I/O port on 16550 serial interfaces is set to
+        // `Undefined` in the SPCR. We know that for x86_64 16550's, the access
+        // size should always be byte.
+        #[cfg(target_arch = "x86_64")]
         if let SerialInterface::Serial16550 = typ {
-            for _ in 0..10 {
-                // Wait for the output buffer to be ready
-                while info.read(5)? & 0x20 == 0 {}
-                info.write(0, 0x41)?;
+            if let Gas::Io { access_size, .. } = &mut info {
+                if let AccessSize::Undefined = access_size {
+                    *access_size = AccessSize::Byte;
+                }
             }
+        }
+
+        for _ in 0..10 {
+            // Wait for the output buffer to be ready
+            if let SerialInterface::Serial16550 = typ {
+                while info.read(5)? & 0x20 == 0 {}
+            }
+
+            // The control bit is set the other way on UART, according to
+            // www.activexperts.com/serial-port-component/tutorials/uart/
+            // and ArmPL011 seems to be UART compatible
+            if let SerialInterface::ArmPL011 = typ {
+                while info.read(5)? & 0x20 != 0 {}
+            }
+
+            info.write(0, 0x41)?;
         }
 
         Ok(Self {
