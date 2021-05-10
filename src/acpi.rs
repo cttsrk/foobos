@@ -918,22 +918,9 @@ impl Spcr {
             }
         }
 
-        for _ in 0..10 {
-            // Wait for the output buffer to be ready
-            if let SerialInterface::Serial16550 = typ {
-                while info.read(5)? & 0x20 == 0 {}
-            }
-
-            // The control bit is set the other way on UART, according to
-            // www.activexperts.com/serial-port-component/tutorials/uart/
-            // FIXME something is wrong here or above, but it prints to screen
-            // somehow
-            if let SerialInterface::ArmPL011 = typ {
-                while info.read(5)? & 0x20 != 0 {}
-            }
-
-            info.write(0, 0x41)?;
-        }
+        let mut serial = crate::serial::Serial::new(info)?;
+        serial.write(b"Hello World\n");
+        panic!();
 
         Ok(Self {
             interface_type: typ,

@@ -3,35 +3,35 @@
 use crate::acpi::{Result, Gas};
 
 /// A generic serial port driver
-pub struct SerialPort {
+pub struct Serial {
     /// Generic Address Structure parsed out of the ACPI tables
     device: Gas,
 }
 
-impl SerialPort {
+impl Serial {
     /// Initialize the serial port to 115200n1.
     pub unsafe fn new(device: Gas) -> Result<Self> {
 
         // Initialize the serial port to a known state:
-        // First disable all interrupts
+        // Disable all interrupts
         device.write(1, 0x00)?;
 
         // Set the Divisor Latch Access Bit (DLAB). This maps offsets 0 and
         // 1 to the low and high bytes of the `Divisor register` (instead
         // of the default `Data` and `Interrupt Enable` registers)
-        device.write(3, 0x80)?;
+        // device.write(3, 0x80)?;
 
         // Low byte divisor (1 for 115200 baud)
-        device.write(0, 0x01)?;
+        // device.write(0, 0x01)?;
 
         // High byte divisor (0 for 115200 baud)
-        device.write(1, 0x00)?;
+        // device.write(1, 0x00)?;
 
         // 8 bits, 1 stop bit, no parity
-        device.write(3, 0x03)?;
+        // device.write(3, 0x03)?;
 
         // Set RTS and DTR
-        device.write(4, 0x03)?;
+        // device.write(4, 0x03)?;
 
         // Create the device
         let mut ret = Self { device };
@@ -62,8 +62,24 @@ impl SerialPort {
         if byte == b'\n' { self.write_byte(b'\r')?; }
 
         unsafe { 
+            /*
+            // Wait for the output buffer to be ready
+            if let SerialInterface::Serial16550 = typ {
+                while self.device.read(5)? & 0x20 == 0 {}
+            }
+
+            // The control bit is set the other way on UART, according to
+            // www.activexperts.com/serial-port-component/tutorials/uart/
+            // FIXME something is wrong here or above, but it prints to screen
+            // somehow
+            if let SerialInterface::ArmPL011 = typ {
+            */
+                while self.device.read(5)? & 0x20 != 0 {}
+            /*
+            }
             // Wait for the output buffer to be ready
             while (self.device.read(5)? & 0x20) == 0 {}
+            */
 
             // Write the byte
             self.device.write(0, byte as u64)?;
