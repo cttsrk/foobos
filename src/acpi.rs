@@ -8,7 +8,7 @@ use crate::mm::physmem::{PhysAddr, PhysSlice};
 use crate::efi;
 
 /// A `Result` type which wraps an ACPI error
-type Result<T> = core::result::Result<T, Error>;
+pub type Result<T> = core::result::Result<T, Error>;
 
 /// Different types of ACPI tables, used mainly for error information
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -677,7 +677,7 @@ impl IoAddr {
 
 /// An ACPI Generic Access Structure
 #[derive(Debug)]
-enum Gas {
+pub enum Gas {
     /// An address in system memory space
     Memory {
         /// Base address
@@ -790,14 +790,14 @@ impl GasType {
 
 impl Gas {
     /// Reads a `val` based on the `self` at the register index `idx`
-    unsafe fn read(&self, idx: usize) -> Result<u64> {
+    pub unsafe fn read(&self, idx: usize) -> Result<u64> {
         self.addr(idx)?.read()
     }
 
     /// Writes `val` to offset `idx` at the register specified by `self`.
     /// The `val` will be truncated to the size of the register specified by
     /// the `Gas`.
-    unsafe fn write(&self, idx: usize, val: u64) -> Result<()> {
+    pub unsafe fn write(&self, idx: usize, val: u64) -> Result<()> {
         self.addr(idx)?.write(val)
     }
 

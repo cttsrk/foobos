@@ -8,6 +8,7 @@ mod core_requirements;
 mod efi;
 mod mm;
 mod acpi;
+mod serial;
 
 use core::panic::PanicInfo;
 
