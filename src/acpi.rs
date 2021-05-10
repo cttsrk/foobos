@@ -926,7 +926,8 @@ impl Spcr {
 
             // The control bit is set the other way on UART, according to
             // www.activexperts.com/serial-port-component/tutorials/uart/
-            // and ArmPL011 seems to be UART compatible
+            // FIXME something is wrong here or above, but it prints to screen
+            // somehow
             if let SerialInterface::ArmPL011 = typ {
                 while info.read(5)? & 0x20 != 0 {}
             }
