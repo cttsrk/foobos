@@ -2,6 +2,9 @@
 
 use crate::acpi::{Result, Gas};
 
+/// Global serial device implementation
+pub static mut SERIAL_DEVICE: Option<Serial> = None;
+
 /// A generic serial port driver
 pub struct Serial {
     /// Generic Address Structure parsed out of the ACPI tables
@@ -10,7 +13,7 @@ pub struct Serial {
 
 impl Serial {
     /// Initialize the serial port to 115200n1.
-    pub unsafe fn new(device: Gas) -> Result<Self> {
+    pub unsafe fn init(device: Gas) -> Result<()> {
 
         // Initialize the serial port to a known state:
         // Disable all interrupts
@@ -39,11 +42,13 @@ impl Serial {
         // Drain all bytes pending on the serial port
         while let Some(_) = ret.read_byte()? {}
 
-        Ok(ret)
+        // Set up the serial device global
+        SERIAL_DEVICE = Some(ret);
+        Ok(())
     }
 
     /// Read a byte from the serial port
-    pub fn read_byte(&mut self) -> Result<Option<u8>> {
+    pub fn read_byte(&self) -> Result<Option<u8>> {
         unsafe {
             // Check if there is a byte available
             if (self.device.read(5)? & 1) == 0 {
@@ -57,7 +62,7 @@ impl Serial {
     }
 
     /// Write a byte to the serial device
-    fn write_byte(&mut self, byte: u8) -> Result<()> {
+    fn write_byte(&self, byte: u8) -> Result<()> {
         // Write a CR prior to all LFs
         if byte == b'\n' { self.write_byte(b'\r')?; }
 
@@ -89,7 +94,7 @@ impl Serial {
     }
 
     /// Write a slice of bytes to the serial device
-    pub fn write (&mut self, bytes: &[u8]) -> Result<()> {
+    pub fn write (&self, bytes: &[u8]) -> Result<()> {
         // Go through each byte and write it
         for &byte in bytes {
             self.write_byte(byte)?

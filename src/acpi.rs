@@ -906,22 +906,7 @@ impl Spcr {
         // The generic address structure
         let mut info: Gas = slice.consume::<[u8; 12]>().map_err(|_| E)?.into();
 
-        // Sometimes the I/O port on 16550 serial interfaces is set to
-        // `Undefined` in the SPCR. We know that for x86_64 16550's, the access
-        // size should always be byte.
-        #[cfg(target_arch = "x86_64")]
-        if let SerialInterface::Serial16550 = typ {
-            if let Gas::Io { access_size, .. } = &mut info {
-                if let AccessSize::Undefined = access_size {
-                    *access_size = AccessSize::Byte;
-                }
-            }
-        }
-
-        let mut serial = crate::serial::Serial::new(info)?;
-        serial.write(b"Hello World\n");
-        panic!();
-
+        // Return out the serial port info
         Ok(Self {
             interface_type: typ,
             address: info,
@@ -971,14 +956,32 @@ pub unsafe fn init() -> Result<()> {
             }
 
             TableType::Spcr => {
-                let spcr = Spcr::from_addr(data, len)?;
+                let mut spcr = Spcr::from_addr(data, len)?;
                 print!("{:#x?}\n", spcr);
 
+                // Sometimes the I/O port on 16550 serial interfaces is set to
+                // `Undefined` in the SPCR. We know that for x86_64 16550's,
+                // the access size should always be byte.
+                #[cfg(target_arch = "x86_64")]
+                if let SerialInterface::Serial16550 = spcr.interface_type {
+                    if let Gas::Io { access_size, .. } = &mut spcr.address {
+                        if let AccessSize::Undefined = access_size {
+                            *access_size = AccessSize::Byte;
+                        }
+                    }
+                }
+
+                // Initialize the serial device
+                crate::serial::Serial::init(spcr.address)?;
             }
 
             // Unknown
             _ => {}
         }
+    }
+    
+    if crate::serial::SERIAL_DEVICE.is_none() {
+        panic!("Could not find valid serial device to use");
     }
 
     Ok(())

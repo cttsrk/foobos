@@ -234,14 +234,15 @@ pub fn get_memory_map(image_handle: EfiHandle) -> Result<RangeSet> {
             }
         }
     
-        /*
         // Exit boot services
         let ret: EfiStatus = ((*(*st).boot_services).exit_boot_services)(
             image_handle, key).into();
         if ret != EfiStatus::Success {
             return Err(Error::ExitBootServices(ret));
         }
-        */
+
+        // Destroy the system table
+        EFI_SYSTEM_TABLE.store(core::ptr::null_mut(), Ordering::SeqCst);
     }
     
     Ok(usable_memory)

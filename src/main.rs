@@ -57,6 +57,7 @@ extern fn efi_main(image_handle: EfiHandle,
         // Get the memory map and exit boot services
         let mut mm = efi::get_memory_map(image_handle)
             .expect("Failed to get EFI memory map");
+        print!("Bye EFI\n");
 
         let addr = mm.allocate(1024 * 1024, 4096).unwrap();
         print!("Allocated {:#x}\n", addr);

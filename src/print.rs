@@ -8,7 +8,11 @@ pub struct ScreenWriter;
 
 impl Write for ScreenWriter {
     fn write_str(&mut self, string: &str) -> Result {
-        crate::efi::output_string(string).map_err(|_| Error)
+        if let Some(serial) = unsafe { crate::serial::SERIAL_DEVICE.as_ref() }{
+            serial.write(string.as_bytes()).map_err(|_| Error)
+        } else {
+            crate::efi::output_string(string).map_err(|_| Error)
+        }
     }
 }
 
