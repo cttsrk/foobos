@@ -2,7 +2,7 @@
 
 set -e
 
-cargo build --target riscv64gc-unknown-uefi.json
+#cargo build --target riscv64-unknown-uefi.json
 
 qemu-system-risvc64 \
     -machine virt \

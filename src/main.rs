@@ -1,5 +1,9 @@
 //! Main bootlader entry for foobOS
+
 #![feature(asm, panic_info_message, bool_to_option)]
+#![allow(clippy::redundant_field_names)]
+#![allow(clippy::print_with_newline)]
+#![deny(missing_docs, clippy::missing_docs_in_private_items)]
 #![no_std]
 #![no_main]
 
@@ -31,8 +35,7 @@ fn panic(info: &PanicInfo) -> ! {
     }
 
     // Loop forever
-    loop {
-    }
+    loop { core::hint::spin_loop(); }
 }
 
 /// EFI entry point
@@ -68,8 +71,10 @@ extern fn efi_main(image_handle: EfiHandle,
         print!("EFI MAIN {:#x}\n", efi_main as usize);
     }
 
-    loop {}
+    panic!("exiting");
 }
 
+/// The stack-probe implementation for Windows targets. This is currently
+/// needed for aarch64 because Rust doesn't disable/generate a stub for probes.
 #[no_mangle]
 fn __chkstk() {}

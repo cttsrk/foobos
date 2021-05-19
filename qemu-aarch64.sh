@@ -10,7 +10,7 @@ qemu-system-aarch64 \
     -m 4096 \
     -cpu cortex-a57 \
     -nographic \
-    -bios edk2_uefi/edk2-aarch64-code.fd \
+    -bios firmware/edk2-aarch64-code.fd \
     -device driver=virtio-net,netdev=n0 \
     -netdev user,id=n0,tftp=target/aarch64-unknown-uefi/release,bootfile=foobos.efi \
 

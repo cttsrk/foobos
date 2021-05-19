@@ -12,7 +12,17 @@ pub struct Serial {
 }
 
 impl Serial {
-    /// Initialize the serial port to 115200n1.
+    /// Initialize the serial port
+    ///
+    /// # Parameters
+    /// 
+    /// * `device` - Generic Address Structure which was parsed from the SPCR
+    ///              ACPI table
+    ///
+    /// # Returns
+    ///
+    /// `()` on success, on error [`Error`](crate::acpi::Error)
+    ///
     pub unsafe fn init(device: Gas) -> Result<()> {
 
         // Initialize the serial port to a known state:
@@ -37,10 +47,10 @@ impl Serial {
         // device.write(4, 0x03)?;
 
         // Create the device
-        let mut ret = Self { device };
+        let ret = Self { device };
 
         // Drain all bytes pending on the serial port
-        while let Some(_) = ret.read_byte()? {}
+        while ret.read_byte()?.is_some() {}
 
         // Set up the serial device global
         SERIAL_DEVICE = Some(ret);
@@ -48,6 +58,12 @@ impl Serial {
     }
 
     /// Read a byte from the serial port
+    ///
+    /// # Returns
+    ///
+    /// On success, returns the byte which was read from the serial port or
+    /// `None` if no byte was available. On error [`Error`](crate::acpi::Error)
+    ///
     pub fn read_byte(&self) -> Result<Option<u8>> {
         unsafe {
             // Check if there is a byte available
@@ -62,6 +78,15 @@ impl Serial {
     }
 
     /// Write a byte to the serial device
+    ///
+    /// # Parameters
+    ///
+    /// * `bytes` - The slice of bytes to write to the serial device
+    /// 
+    /// # Returns
+    ///
+    /// `()` on success, on error [`Error`](crate::acpi::Error)
+    ///
     fn write_byte(&self, byte: u8) -> Result<()> {
         // Write a CR prior to all LFs
         if byte == b'\n' { self.write_byte(b'\r')?; }
@@ -94,6 +119,15 @@ impl Serial {
     }
 
     /// Write a slice of bytes to the serial device
+    ///
+    /// # Parameters
+    ///
+    /// * `bytes` - The slice of bytes to write to the serial device
+    ///
+    /// # Returns
+    ///
+    /// `()` on success, on error [`Error`](crate::acpi::Error)
+    ///
     pub fn write (&self, bytes: &[u8]) -> Result<()> {
         // Go through each byte and write it
         for &byte in bytes {

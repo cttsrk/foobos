@@ -52,10 +52,7 @@ impl EfiSystemTablePtr {
     /// must be able to be found in a global
     pub unsafe fn register(self) {
         let _ = EFI_SYSTEM_TABLE.compare_exchange(
-            core::ptr::null_mut(),
-            self.0,
-            Ordering::SeqCst,
-            Ordering::SeqCst);
+            core::ptr::null_mut(), self.0, Ordering::SeqCst, Ordering::SeqCst);
     }
 }
 
@@ -69,6 +66,16 @@ static EFI_SYSTEM_TABLE: AtomicPtr<EfiSystemTable> =
     AtomicPtr::new(core::ptr::null_mut());
 
 /// Write a `string` to the UEFI console output
+///
+/// # Parameters
+///
+/// * `string` - The string to write to the UEFI console output using the UEFI
+///              API
+///
+/// # Returns
+///
+/// `()`, on error [`Error`]
+///
 pub fn output_string(string: &str) -> Result<()> {
     // Get the system_table
     let st = EFI_SYSTEM_TABLE.load(Ordering::SeqCst);
@@ -130,8 +137,13 @@ pub fn output_string(string: &str) -> Result<()> {
     Ok(())
 }
 
-/// Get the base of the ACPI table RSDP. If EFI did not report an ACPI table
-/// then we return `None`.
+/// Get the base of the ACPI table RSDP
+///
+/// # Returns
+///
+/// The base address of the ACPI RSDP table as specified by EFI, on error
+/// [`Error`]
+///
 pub fn get_acpi_table() -> Result<usize> {
     /// ACPI 2.0 or newer tables should use EFI_ACPI_TABLE_GUID
     const EFI_ACPI_TABLE_GUID: EfiGuid = EfiGuid(
@@ -168,6 +180,17 @@ pub fn get_acpi_table() -> Result<usize> {
 }
 
 /// Get the memory map for the system from the UEFI
+///
+/// # Parameters
+///
+/// * `image_handle` - The handle to the EFI image as passed into `efi_main`
+///
+/// # Returns
+///
+/// The [`RangeSet`] containing the ranges of physical addresses which are
+/// available for general purpose use from this point onwards. On error
+/// [`Error`] .
+/// 
 pub fn get_memory_map(image_handle: EfiHandle) -> Result<RangeSet> {
     // Get the system table
     let st = EFI_SYSTEM_TABLE.load(Ordering::SeqCst);
@@ -215,22 +238,21 @@ pub fn get_memory_map(image_handle: EfiHandle) -> Result<RangeSet> {
             let typ: EfiMemoryType = entry.typ.into();
 
             // Check if this memory is usable after we exit boot services
-            if typ.avail_post_exit_boot_services() {
-                if entry.number_of_pages > 0 {
-                    // Get the number of bytes for this memory region
-                    let bytes = entry.number_of_pages.checked_mul(4096)
-                        .ok_or(Error::MemoryMapIntegerOverflow)?;
+            if typ.avail_post_exit_boot_services() &&
+                    entry.number_of_pages > 0 {
+                // Get the number of bytes for this memory region
+                let bytes = entry.number_of_pages.checked_mul(4096)
+                    .ok_or(Error::MemoryMapIntegerOverflow)?;
 
-                    // Compute the end physical address of this region
-                    let end = entry.physical_start.checked_add(bytes - 1)
-                        .ok_or(Error::MemoryMapIntegerOverflow)?;
+                // Compute the end physical address of this region
+                let end = entry.physical_start.checked_add(bytes - 1)
+                    .ok_or(Error::MemoryMapIntegerOverflow)?;
 
-                    // Set the usable memory information
-                    usable_memory.insert(Range {
-                        start: entry.physical_start,
-                        end:   end
-                    }).map_err(|e| Error::MemoryRangeSet(e))?;
-                }
+                // Set the usable memory information
+                usable_memory.insert(Range {
+                    start: entry.physical_start,
+                    end:   end
+                }).map_err(Error::MemoryRangeSet)?;
             }
         }
     
@@ -487,39 +509,89 @@ struct EfiInputKey {
     unicode_char: u16,
 }
 
-/// EFI memory types
+/// EFI memory types for after boot services have been exited
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
 enum EfiMemoryType {
+    /// Not used
     ReservedMemoryType,
+
+    /// The loader and/or OS may use this memory as they see fit. Note: the OS
+    /// loader that called `ExitBootServices()` is utilizing one or more
+    /// [`EfiMemoryType::LoaderCode`] ranges.
     LoaderCode,
+
+    /// The loader and/or OS may use this memory as they see fit. Note: the OS
+    /// loader that called `ExitBootServices()` is utilizing one or more
+    /// [`EfiMemoryType::LoaderData`] ranges.
     LoaderData,
+
+    /// Memory available for general use
     BootServicesCode,
+
+    /// Memory available for general use
     BootServicesData,
+
+    /// The memory in this range is to be preserved by the loader and OS in the
+    /// working and ACPI S1...S3 states.
     RuntimeServicesCode,
+
+    /// The memory in this range is to be preserved by the loader and OS in the
+    /// working and ACPI S1...S3 states.
     RuntimeServicesData,
+
+    /// Memory available for general use
     ConventionalMemory,
+
+    /// Memory that contains errors and is not to be used
     UnusableMemory,
+
+    /// This memory is to be preserved by the loader and OS until ACPI is
+    /// enabled. Once ACPI is enabled, the memory in this range is available
+    /// for general use.
     ACPIReclaimMemory,
+
+    /// The memory in this range is to be preserved by the loader and OS in the
+    /// working and ACPI S1...S3 states.
     ACPIMemoryNVS,
+
+    /// This memory is not used by the OS. All system memory-mapped IO
+    /// information should come from ACPI tables
     MemoryMappedIO,
+
+    /// This memory is not used by the OS. All system memory-mapped IO port
+    /// information should come from ACPI tables
     MemoryMappedIOPortSpace,
+
+    /// This memory is to be preserved by the loader and OS in the working and
+    /// ACPI S1...S3 states. This memory may also have other attributes that
+    /// are defined by the processor implementation.
     PalCode,
+
+    /// Memory that has non-volatile attributes and is distinct from
+    /// conventional volatile memory. The memory region supports
+    /// byte-addressable non-volatility.
     PersistentMemory,
-    Invalid,
+
+    /// An unknown UEFI memory type
+    Other(u32),
 }
 
 impl EfiMemoryType {
     /// Returns whether or not this memory type is available for general
     /// purpose use after boot services have been exited
+    ///
+    /// # Returns 
+    ///
+    /// `true` if the memory type is usable after exiting boot services
+    ///
     fn avail_post_exit_boot_services(&self) -> bool {
-        match self {
-            EfiMemoryType::BootServicesCode    |
-            EfiMemoryType::BootServicesData    |
-            EfiMemoryType::ConventionalMemory  |
-            EfiMemoryType::PersistentMemory    => true,
-            _ => false
-        }
+        matches!(self,
+            EfiMemoryType::BootServicesCode   |
+            EfiMemoryType::BootServicesData   |
+            EfiMemoryType::ConventionalMemory |
+            EfiMemoryType::PersistentMemory
+        )
     }
 }
 
@@ -541,7 +613,7 @@ impl From<u32> for EfiMemoryType {
             12 => EfiMemoryType::MemoryMappedIOPortSpace,
             13 => EfiMemoryType::PalCode,
             14 => EfiMemoryType::PersistentMemory,
-             _ => EfiMemoryType::Invalid,
+             _ => EfiMemoryType::Other(val),
         }
     }
 }

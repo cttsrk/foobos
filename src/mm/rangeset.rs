@@ -56,6 +56,11 @@ pub struct RangeSet {
 
 impl RangeSet {
     /// Create a new empty RangeSet
+    ///
+    /// # Returns
+    ///
+    /// An empty [`RangeSet`]
+    ///
     pub const fn new() -> RangeSet {
         RangeSet {
             ranges: [Range { start: 0, end: 0 }; 256],
@@ -64,11 +69,25 @@ impl RangeSet {
     }
 
     /// Get all the entries in the RangeSet as a slice
+    ///
+    /// # Returns
+    ///
+    /// A slice to the [`Range`]s in the [`RangeSet`]
+    ///
     pub fn entries(&self) -> &[Range] {
         &self.ranges[..self.in_use]
     }
 
     /// Delete the Range contained in the RangeSet at `idx`
+    ///
+    /// # Parameters
+    ///
+    /// * `idx` - The index of the [`Range`] to delete from the [`RangeSet`]
+    ///
+    /// # Returns
+    ///
+    /// `()` on success, on error [`Error`]
+    ///
     fn delete(&mut self, idx: usize) -> Result<()> {
         // Make sure we're deleting a valid index
         if idx >= self.in_use {
@@ -89,6 +108,15 @@ impl RangeSet {
     /// If the range overlaps with an existing range, then the ranges will
     /// be merged. If the range has no overlap with an existing range then
     /// it will simply be added to the set.
+    ///
+    /// # Parameters
+    ///
+    /// * `range` - The [`Range`] to insert into the [`RangeSet`]
+    ///
+    /// # Returns
+    ///
+    /// `()` on success, on error [`Error`]
+    ///
     pub fn insert(&mut self, mut range: Range) -> Result<()> {
         // Check the range
         if range.end < range.start {
@@ -151,6 +179,15 @@ impl RangeSet {
     /// such that there is no more overlap. If this results in a range in
     /// the set becoming empty, the range will be removed entirely from the
     /// set.
+    ///
+    /// # Parameters
+    ///
+    /// * `Range` - The [`Range`] to remove from the [`RangeSet`]
+    ///
+    /// # Returns
+    ///
+    /// `()` on success, on error [`Error`]
+    ///
     pub fn remove(&mut self, range: Range) -> Result<()> {
         // Check the range
         if range.end < range.start {
@@ -216,7 +253,13 @@ impl RangeSet {
         Ok(())
     }
 
-    /// Compute the size of the range covered by this rangeset
+    /// Compute the size of the range covered by this [`RangeSet`]
+    ///
+    /// # Returns
+    ///
+    /// The size of the [`RangeSet`], or `None` if the size of the [`RangeSet`]
+    /// exceeds the bounds of a [`u64`]
+    ///
     pub fn sum(&self) -> Option<u64> {
         self.entries().iter().try_fold(0u64, |acc, x| {
             Some(acc + (x.end - x.start).checked_add(1)?)
@@ -224,6 +267,17 @@ impl RangeSet {
     }
 
     /// Allocate `size` bytes of memory with `align` requirement for alignment
+    ///
+    /// # Parameters
+    ///
+    /// * `size`  - The number of bytes to allocate
+    /// * `align` - The alignment requirement of the allocation
+    ///
+    /// # Returns
+    ///
+    /// An address satisfying the `size` and `align` on success, on error
+    /// [`Error`]
+    ///
     pub fn allocate(&mut self, size: u64, align: u64) -> Result<usize> {
         // Allocate anywhere from the `RangeSet`
         self.allocate_prefer(size, align, None)
@@ -234,6 +288,20 @@ impl RangeSet {
     /// satisfied from `regions` the allocation will come from whatever is next
     /// best. If `regions` is `None`, then the allocation will be satisfied
     /// from anywhere.
+    ///
+    /// # Parameters
+    ///
+    /// * `size`    - The number of bytes to allocate
+    /// * `align`   - The alignment requirement of the allocation
+    /// * `regions` - An optional [`RangeSet`] which may restrict the allowed
+    ///               regions from which the allocation must be satisfied. If
+    ///               `None` then there is no restriction.
+    ///
+    /// # Returns
+    ///
+    /// An address satisfying the `size`, `align` and `regions` on success, on
+    /// error [`Error`]
+    ///
     pub fn allocate_prefer(&mut self, size: u64, align: u64,
                            regions: Option<&RangeSet>) -> Result<usize> {
         // Don't allow allocations of zero size
@@ -338,13 +406,25 @@ impl RangeSet {
 /// Determines overlap of `a` and `b`. If there is overlap, returns the range
 /// of the overlap
 ///
-/// In this overlap, returns:
+/// # Parameters
 ///
+/// * `a` - The first [`Range`] to check for overlap
+/// * `b` - The second [`Range`] to check for overlap
+///
+/// # Returns
+///
+/// The boundaries of the overlapping region, or `None` if there is no overlap
+///
+/// # Example
+///
+/// ```text
 /// [a.start -------------- a.end]
 ///            [b.start -------------- b.end]
 ///            |                 |
 ///            ^-----------------^
 ///            [ Return value    ]
+///
+/// ```
 ///
 fn overlaps(mut a: Range, mut b: Range) -> Option<Range> {
     // Make sure range `a` is always lowest to biggest
@@ -368,8 +448,17 @@ fn overlaps(mut a: Range, mut b: Range) -> Option<Range> {
     }
 }
 
-/// Returns true if the entirety of `a` is contained inside `b`, else
-/// returns false.
+/// Checks if `a` is entirely contained in `b`
+///
+/// # Parameters
+///
+/// * `a` - The [`Range`] to check as a subset of `b` (the "needle")
+/// * `b` - The [`Range`] to check as a superset of `a` (the "haystack")
+///
+/// # Returns
+///
+/// `true` if a is contained entirely by `b`, otherwise `false` 
+///
 fn contains(mut a: Range, mut b: Range) -> bool {
     // Make sure range `a` is always lowest to biggest
     if a.start > a.end {

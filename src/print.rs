@@ -1,9 +1,10 @@
-//! This file handles the `print!()` macro which allows displaying
-//! information to the UEFI standard out console
+//! This file handles the [`print!`] macro which allows displaying
+//! information to the UEFI standard out console via the UEFI API, or to the
+//! serial port specified by the ACPI SPCR table.
 
 use core::fmt::{Result, Write, Error};
 
-/// A dummy screen writing structure we can implement `Write` on
+/// A dummy screen writing structure we can implement [`Write`] on
 pub struct ScreenWriter;
 
 impl Write for ScreenWriter {
@@ -16,7 +17,7 @@ impl Write for ScreenWriter {
     }
 }
 
-/// The standard Rust `print!()` macro!
+/// The standard Rust [`print!`] macro!
 #[macro_export]
 macro_rules! print {
     ($($arg:tt)*) => {
@@ -25,4 +26,3 @@ macro_rules! print {
             format_args!($($arg)*));
     }
 }
-

@@ -1,4 +1,4 @@
-//! This holds the libcore basic requirements for things like libc routines
+//! This holds the [`core`] basic requirements for things like libc routines
 
 use core::mem::size_of;
 
@@ -18,9 +18,10 @@ use core::mem::size_of;
 #[cfg(target_arch = "x86_64")]
 unsafe extern fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     asm!("rep movsb",
-         inout("rcx") n    => _,
-         inout("rdi") dest => _,
-         inout("rsi") src  => _);
+        inout("rcx") n    => _,
+        inout("rdi") dest => _,
+        inout("rsi") src  => _,
+        options(nostack));
 
     dest
 }
@@ -43,8 +44,8 @@ unsafe extern fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     let mut ii = 0;
 
     while ii < n {
-        let dest = dest.offset(ii as isize);
-        let src  = src.offset(ii as isize);
+        let dest = dest.add(ii);
+        let src  = src.add(ii);
         core::ptr::write(dest, core::ptr::read(src));
         ii += 1;
     }
@@ -93,8 +94,8 @@ unsafe extern fn memmove(dest: *mut u8, src: *const u8, mut n: usize)
             while n != 0 && (dest as usize)
                     .wrapping_add(n) & (size_of::<u64>() - 1) != 0 {
                 n = n.wrapping_sub(1);
-                core::ptr::write(dest.offset(n as isize),
-                    core::ptr::read(src.offset(n as isize)));
+                core::ptr::write(dest.add(n),
+                    core::ptr::read(src.add(n)));
             }
 
             // Do a reverse copy one `u64` at a time
@@ -102,18 +103,17 @@ unsafe extern fn memmove(dest: *mut u8, src: *const u8, mut n: usize)
                 n = n.wrapping_sub(size_of::<u64>());
 
                 // Read the value to copy
-                let val = core::ptr::read_unaligned(
-                    src.offset(n as isize) as *const u64);
+                let val = core::ptr::read_unaligned(src.add(n) as *const u64);
 
                 // Write out the value
-                core::ptr::write(dest.offset(n as isize) as *mut u64, val);
+                core::ptr::write(dest.add(n) as *mut u64, val);
             }
 
             // Just copy the remainder
             while n != 0 {
                 n = n.wrapping_sub(1);
-                core::ptr::write(dest.offset(n as isize),
-                    core::ptr::read(src.offset(n as isize)));
+                core::ptr::write(dest.add(n),
+                    core::ptr::read(src.add(n)));
             }
 
             return dest;
@@ -126,8 +126,8 @@ unsafe extern fn memmove(dest: *mut u8, src: *const u8, mut n: usize)
             n = n.wrapping_sub(overhang);
 
             // Copy the remaining parts
-            let src  = src.offset(n as isize);
-            let dest = dest.offset(n as isize);
+            let src  = src.add(n);
+            let dest = dest.add(n);
             memcpy(dest, src, overhang);
         }
 
@@ -164,7 +164,8 @@ unsafe extern fn memset(s: *mut u8, c: i32, n: usize) -> *mut u8 {
     asm!("rep stosb",
          inout("rcx") n => _,
          inout("rdi") s => _,
-         in("eax")    c as u32);
+         in("eax")    c as u32,
+         options(nostack));
 
     s
 }
@@ -187,7 +188,7 @@ unsafe extern fn memset(s: *mut u8, c: i32, n: usize) -> *mut u8 {
     let mut ii = 0;
 
     while ii < n {
-        let s = s.offset(ii as isize);
+        let s = s.add(ii);
         core::ptr::write(s, c as u8);
         ii += 1;
     }
@@ -213,8 +214,8 @@ unsafe extern fn memcmp(s1: *const u8, s2: *const u8, n: usize)
     let mut ii = 0;
 
     while ii < n {
-        let a = core::ptr::read(s1.offset(ii as isize));
-        let b = core::ptr::read(s2.offset(ii as isize));
+        let a = core::ptr::read(s1.add(ii));
+        let b = core::ptr::read(s2.add(ii));
         if a != b {
             return (a as i32).wrapping_sub(b as i32);
         }

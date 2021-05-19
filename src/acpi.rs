@@ -36,7 +36,6 @@ pub enum TableType {
 }
 
 impl From<[u8; 4]> for TableType {
-    /// Convert from an ACPI table string into an enum
     fn from(val: [u8; 4]) -> Self {
         match &val {
             b"XSDT" => Self::Xsdt,
@@ -54,7 +53,7 @@ pub enum Error {
     /// An EFI API returned an error
     EfiError(efi::Error),
 
-    /// An RSDP table was processed, which had an invalid checksum
+    /// An ACPI table had an invalid checksum
     ChecksumMismatch(TableType),
 
     /// An ACPI table did not match the correct signature
@@ -87,6 +86,7 @@ pub enum Error {
 
     /// An I/O port address was specified in a Generic Address Structure and
     /// I/O ports are not supported on this architecture
+    #[allow(dead_code)]
     GasIoPortNotAvailable,
 
     /// An attempt was made to access the extended RSDP but the ACPI
@@ -102,6 +102,19 @@ pub enum Error {
 }
 
 /// Compute an ACPI checksum on physical memory
+/// 
+/// # Parameters
+///
+/// * `addr` - The physical address to performa a checksum on
+/// * `size` - The length (in bytes) of the memory to checksum
+/// * `typ`  - The type of the table which is being checksummed. This is simply
+///            used to affect the error value that is returned if the checksum
+///            is invalid.
+///
+/// # Returns
+///
+/// `() if the checksum is valid, [`Errror`] on errors
+///
 unsafe fn checksum(addr: PhysAddr, size: usize, typ: TableType) -> Result<()> {
 
     // Compute checksum
@@ -115,7 +128,7 @@ unsafe fn checksum(addr: PhysAddr, size: usize, typ: TableType) -> Result<()> {
     if chk == 0 {
         Ok(())
     } else {
-        return Err(Error::ChecksumMismatch(typ));
+        Err(Error::ChecksumMismatch(typ))
     }
 }
 
@@ -147,7 +160,18 @@ struct Rsdp {
 }
 
 impl Rsdp {
-    /// Load an RSDP structure from `addr`
+    /// Load an RSDP structure
+    ///
+    /// # Parameters
+    ///
+    /// * `addr` - The physical address of the memory to be interpreted as an
+    ///            RSDP table
+    ///
+    /// # Returns
+    ///
+    /// A well formed [`Rsdp`] if `addr` references a valid RSDP table.
+    /// [`Error`] on errors.
+    ///
     unsafe fn from_addr(addr: PhysAddr) -> Result<Self> {
         // Validate the checksum
         checksum(addr, size_of::<Self>(), TableType::Rsdp)?;
@@ -188,7 +212,18 @@ struct RsdpExtended {
 }
 
 impl RsdpExtended {
-    /// Load an extended RSDP structure from `addr`
+    /// Load an extended RSDP structure
+    ///
+    /// # Parameters
+    ///
+    /// * `addr` - The physical address of the memory to be interpreted as an
+    ///            extended RSDP table
+    ///
+    /// # Returns
+    ///
+    /// A well formed [`RsdpExtended`] if `addr` references a valid extended 
+    /// RSDP table. [`Error`] on errors.
+    ///
     unsafe fn from_addr(addr: PhysAddr) -> Result<Self> {
         // First read the RSDP. This is the ACPI 1.0 structure and thus is
         // a subset and backwards compatible with all future revisions.
@@ -258,10 +293,25 @@ struct Table {
 }
 
 impl Table {
-    /// Attempt to process `addr` as an ACPI table and return the type of
-    /// table that was found
+    /// Load a generic ACPI table with the standard ACPI table header
     ///
-    /// Returns (header, type of table, address of contents, content length)
+    /// # Parameters
+    ///
+    /// * `addr` - The physical address of the memory to be interpreted as an
+    ///            ACPI table
+    ///
+    /// # Returns
+    ///
+    /// A tuple containing the following:
+    ///
+    /// 0. A [`Table`] containing the parsed table header
+    /// 1. A [`TableType`] containing the type of ACPI table which was
+    ///    identified
+    /// 2. The physical address of the opaque payload of the table
+    /// 3. The size (in bytes) of the payload
+    ///
+    /// On error, an [`Error`]
+    ///
     unsafe fn from_addr(addr: PhysAddr)
             -> Result<(Self, TableType, PhysAddr, usize)> {
         // Read the table
@@ -289,7 +339,17 @@ impl Table {
 struct Madt;
 
 impl Madt {
-    /// Process the payload of an MADT based on a physical address and a size
+    /// Parse the payload of an ACPI MADT table
+    ///
+    /// # Parameters
+    ///
+    /// * `addr` - The physical address of the start of an MADT payload
+    /// * `size` - The size (in bytes) of the MADT payload
+    /// 
+    /// # Returns
+    ///
+    /// A parsed representation of the [`Madt`], on error [`Error`]
+    /// 
     unsafe fn from_addr(addr: PhysAddr, size: usize) -> Result<Self> {
         /// The error type to throw when the MADT is truncated
         const E: Error = Error::LengthMismatch(TableType::Madt);
@@ -488,7 +548,7 @@ impl From<u8> for SerialInterface {
 
 /// An acess size for an ACPI Generaic Access Structure
 #[derive(Debug, Clone, Copy)]
-enum AccessSize {
+pub enum AccessSize {
     /// Undefined (legacy reasons)
     Undefined,
 
@@ -523,154 +583,129 @@ impl From<u8> for AccessSize {
 
 /// An I/O port address
 #[derive(Clone, Copy, Debug)]
-struct IoAddr(pub u64);
+pub struct IoAddr(pub u64);
 
 impl IoAddr {
     /// Read a value from an I/O port
+    ///
+    /// # Returns
+    ///
+    /// The value read from the I/O port, or en error [`Error`]
+    ///
     unsafe fn read_u8(&self) -> Result<u8> {
+        #[cfg(target_arch = "x86_64")]
         {
             let val: u8;
-            #[cfg(target_arch = "x86_64")]
             asm!("in al, dx", out("al") val, in("dx") self.0,
                 options(nomem, nostack, preserves_flags));
-
-            #[cfg(target_arch = "aarch64")]
-            asm!("ldrb w0, [x1]", out("w0") val, in("x1") self.0,
-                options(nomem, nostack, preserves_flags));
-
             Ok(val)
         }
 
-        #[cfg(target_arch = "risvc64")]
+        #[cfg(not(target_arch = "x86_64"))]
         Err(Error::GasIoPortNotAvailable)
     }
 
     /// Read a value from an I/O port
+    ///
+    /// # Returns
+    ///
+    /// The value read from the I/O port, or en error [`Error`]
+    ///
     unsafe fn read_u16(&self) -> Result<u16> {
+        #[cfg(target_arch = "x86_64")]
         {
             let val: u16;
-            #[cfg(target_arch = "x86_64")]
             asm!("in ax, dx", out("ax") val, in("dx") self.0,
                 options(nomem, nostack, preserves_flags));
-
-            #[cfg(target_arch = "aarch64")]
-            asm!("ldrh w0, [x1]", out("w0") val, in("x1") self.0,
-                options(nomem, nostack, preserves_flags));
-
             Ok(val)
         }
 
-        #[cfg(target_arch = "risvc64")]
+        #[cfg(not(target_arch = "x86_64"))]
         Err(Error::GasIoPortNotAvailable)
     }
 
     /// Read a value from an I/O port
+    ///
+    /// # Returns
+    ///
+    /// The value read from the I/O port, or en error [`Error`]
+    ///
     unsafe fn read_u32(&self) -> Result<u32> {
+        #[cfg(target_arch = "x86_64")]
         {
             let val: u32;
-            #[cfg(target_arch = "x86_64")]
             asm!("in eax, dx", out("eax") val, in("dx") self.0,
                 options(nomem, nostack, preserves_flags));
-
-            #[cfg(target_arch = "aarch64")]
-            asm!("ldr w0, [x1]", out("w0") val, in("x1") self.0,
-                options(nomem, nostack, preserves_flags));
-
             Ok(val)
         }
 
-        #[cfg(target_arch = "risvc64")]
+        #[cfg(not(target_arch = "x86_64"))]
         Err(Error::GasIoPortNotAvailable)
     }
 
-    /// Read a value from an I/O port
-    unsafe fn read_u64(&self) -> Result<u64> {
+    /// Write a `_val` to the I/O port
+    ///
+    /// # Parameters
+    ///
+    /// * `_val` - The value to write to the I/O port
+    ///
+    /// # Returns
+    ///
+    /// `()`, on error [`Error`]
+    ///
+    unsafe fn write_u8(&self, _val: u8) -> Result<()> {
+        #[cfg(target_arch = "x86_64")]
         {
-            let val: u64;
-            #[cfg(target_arch = "x86_64")]
-            asm!("in rax, dx", out("rax") val, in("dx") self.0,
+            asm!("out dx, al", in("dx") self.0, in("al") _val,
                 options(nomem, nostack, preserves_flags));
-
-            #[cfg(target_arch = "aarch64")]
-            asm!("ldr x0, [x1]", out("x0") val, in("x1") self.0,
-                options(nomem, nostack, preserves_flags));
-
-            Ok(val)
-        }
-
-        #[cfg(target_arch = "risvc64")]
-        Err(Error::GasIoPortNotAvailable)
-    }
-
-    /// Write a `val` to the I/O port
-    unsafe fn write_u8(&self, val: u8) -> Result<()> {
-        {
-            #[cfg(target_arch = "x86_64")]
-            asm!("out dx, al", in("dx") self.0, in("al") val,
-                options(nomem, nostack, preserves_flags));
-
-            #[cfg(target_arch = "aarch64")]
-            asm!("strb w0, [x1]", in("w0") val as u32, in("x1") self.0,
-                options(nomem, nostack, preserves_flags));
-
             Ok(())
         }
 
-        #[cfg(target_arch = "risvc64")]
+        #[cfg(not(target_arch = "x86_64"))]
         Err(Error::GasIoPortNotAvailable)
     }
 
-    /// Write a `val` to the I/O port
-    unsafe fn write_u16(&self, val: u16) -> Result<()> {
+    /// Write a `_val` to the I/O port
+    ///
+    /// # Parameters
+    ///
+    /// * `_val` - The value to write to the I/O port
+    ///
+    /// # Returns
+    ///
+    /// `()`, on error [`Error`]
+    ///
+    unsafe fn write_u16(&self, _val: u16) -> Result<()> {
+        #[cfg(target_arch = "x86_64")]
         {
-            #[cfg(target_arch = "x86_64")]
-            asm!("out dx, ax", in("dx") self.0, in("ax") val,
+            asm!("out dx, ax", in("dx") self.0, in("ax") _val,
                 options(nomem, nostack, preserves_flags));
-
-            #[cfg(target_arch = "aarch64")]
-            asm!("strh w0, [x1]", in("w0") val as u32, in("x1") self.0,
-                options(nomem, nostack, preserves_flags));
-
             Ok(())
         }
 
-        #[cfg(target_arch = "risvc64")]
+        #[cfg(not(target_arch = "x86_64"))]
         Err(Error::GasIoPortNotAvailable)
     }
 
-    /// Write a `val` to the I/O port
-    unsafe fn write_u32(&self, val: u32) -> Result<()> {
+    /// Write a `_val` to the I/O port
+    ///
+    /// # Parameters
+    ///
+    /// * `_val` - The value to write to the I/O port
+    ///
+    /// # Returns
+    ///
+    /// `()`, on error [`Error`]
+    ///
+    unsafe fn write_u32(&self, _val: u32) -> Result<()> {
+        #[cfg(target_arch = "x86_64")]
         {
-            #[cfg(target_arch = "x86_64")]
-            asm!("out dx, eax", in("dx") self.0, in("eax") val,
+            asm!("out dx, eax", in("dx") self.0, in("eax") _val,
                 options(nomem, nostack, preserves_flags));
-
-            #[cfg(target_arch = "aarch64")]
-            asm!("str w0, [x1]", in("w0") val as u32, in("x1") self.0,
-                options(nomem, nostack, preserves_flags));
-
             Ok(())
         }
 
-        #[cfg(target_arch = "risvc64")]
-        Err(Error::GasIoPortNotAvailable)
-    }
-
-    /// Write a `val` to the I/O port
-    unsafe fn write_u64(&self, val: u64) -> Result<()> {
-        {
-            #[cfg(target_arch = "x86_64")]
-            asm!("out dx, rax", in("dx") self.0, in("rax") val,
-                options(nomem, nostack, preserves_flags));
-
-            #[cfg(target_arch = "aarch64")]
-            asm!("str x0, [x1]", in("x0") val as u64, in("x1") self.0,
-                options(nomem, nostack, preserves_flags));
-
-            Ok(())
-        }
-
-        #[cfg(target_arch = "risvc64")]
+        #[cfg(not(target_arch = "x86_64"))]
         Err(Error::GasIoPortNotAvailable)
     }
 }
@@ -734,20 +769,25 @@ enum GasType {
 
 impl GasType {
     /// Read a value from the location specified by `self`
+    ///
+    /// # Returns
+    ///
+    /// A zero-extended version of the read value. The original size is
+    /// specified by the [`AccessSize`].
+    ///
     unsafe fn read(&self) -> Result<u64> {
         Ok(match self {
             Self::Io { addr, access_size } => {
-                // Perform the write
+                // Perform the read
                 match access_size {
                     AccessSize::Byte  => addr.read_u8()?  as u64,
                     AccessSize::Word  => addr.read_u16()? as u64,
                     AccessSize::Dword => addr.read_u32()? as u64,
-                    AccessSize::Qword => addr.read_u64()? as u64,
                     _ => return Err(Error::GasInvalidAccessSize),
                 }
             },
             Self::Memory { addr, access_size } => {
-                // Perform the write
+                // Perform the read
                 match access_size {
                     AccessSize::Byte  => addr.read::<u8>()  as u64,
                     AccessSize::Word  => addr.read::<u16>() as u64,
@@ -756,20 +796,29 @@ impl GasType {
                     _ => return Err(Error::GasInvalidAccessSize),
                 }
             },
-            _ => panic!(),
         })
     }
 
-    /// Write a `val` to the location specified by `self`
+    /// Write a value to the location specified by `self`
+    ///
+    /// # Parameters
+    ///
+    /// * `val` - A value to be written to the location. This value is
+    ///           truncated to the size specified by the [`AccessSize`] of the
+    ///           [`GasType`] .
+    ///
+    /// # Returns
+    ///
+    /// `()`, on error [`Error`]
+    ///
     unsafe fn write(&self, val: u64) -> Result<()> {
-        Ok(match self {
+        match self {
             Self::Io { addr, access_size } => {
                 // Perform the write
                 match access_size {
                     AccessSize::Byte  => addr.write_u8( val as u8)?,
                     AccessSize::Word  => addr.write_u16(val as u16)?,
                     AccessSize::Dword => addr.write_u32(val as u32)?,
-                    AccessSize::Qword => addr.write_u64(val as u64)?,
                     _ => return Err(Error::GasInvalidAccessSize),
                 }
             },
@@ -783,26 +832,64 @@ impl GasType {
                     _ => return Err(Error::GasInvalidAccessSize),
                 }
             },
-            _ => panic!(),
-        })
+        }
+
+        Ok(())
     }
 }
 
 impl Gas {
+    /// Read a value from the location specified by `self` offset by `idx`
+    ///
+    /// # Parameters
+    ///
+    /// * `idx` - The zero-indexed offset to be applied to the base of the
+    ///           location, specified in number of elements. The width of an
+    ///           element is determined by the `register_width`.
+    ///
+    /// # Returns
+    ///
+    /// A zero-extended version of the read value. The original size is
+    /// specified by the [`AccessSize`].
+    ///
     /// Reads a `val` based on the `self` at the register index `idx`
     pub unsafe fn read(&self, idx: usize) -> Result<u64> {
         self.addr(idx)?.read()
     }
 
-    /// Writes `val` to offset `idx` at the register specified by `self`.
-    /// The `val` will be truncated to the size of the register specified by
-    /// the `Gas`.
+    /// Write a value to the location specified by `self`
+    ///
+    /// # Parameters
+    ///
+    /// * `idx` - The zero-indexed offset to be applied to the base of the
+    ///           location, specified in number of elements. The width of an
+    ///           element is determined by the `register_width`.
+    /// * `val` - A value to be written to the location. This value is
+    ///           truncated to the size specified by the [`AccessSize`] of the
+    ///           [`GasType`] .
+    ///
+    /// # Returns
+    ///
+    /// `()`, on error [`Error`]
+    ///
     pub unsafe fn write(&self, idx: usize, val: u64) -> Result<()> {
         self.addr(idx)?.write(val)
     }
 
-    /// Compute the address to access the register associated with this `Gas`
+    /// Compute the address to access the register associated with this [`Gas`] 
     /// based on the `idx`
+    ///
+    /// # Parameters
+    ///
+    /// * `idx` - The zero-indexed offset to be applied to the base of the
+    ///           location, specified in number of elements. The width of an
+    ///           element is determined by the `register_width`.
+    /// 
+    /// # Returns
+    /// 
+    /// The [`GasType`] which contains a simplified post-indexed representation
+    /// of a [`Gas`], on error [`Error`]
+    ///
     fn addr(&self, idx: usize) -> Result<GasType> {
         Ok(match self {
             Self::Io { addr, register_width,
@@ -888,7 +975,17 @@ struct Spcr {
 }
 
 impl Spcr {
-    /// Process the payload of an SPCR based on a physical address and a size
+    /// Parse the payload of an ACPI SPCR table
+    ///
+    /// # Parameters
+    ///
+    /// * `addr` - The physical address of the start of an SPCR payload
+    /// * `size` - The size (in bytes) of the SPCR payload
+    /// 
+    /// # Returns
+    ///
+    /// A parsed representation of the [`Spcr`], on error [`Error`]
+    /// 
     unsafe fn from_addr(addr: PhysAddr, size: usize) -> Result<Self> {
         /// The error type to throw when the SPCR is truncated
         const E: Error = Error::LengthMismatch(TableType::Spcr);
@@ -904,7 +1001,7 @@ impl Spcr {
         slice.discard(3).map_err(|_| E)?;
 
         // The generic address structure
-        let mut info: Gas = slice.consume::<[u8; 12]>().map_err(|_| E)?.into();
+        let info: Gas = slice.consume::<[u8; 12]>().map_err(|_| E)?.into();
 
         // Return out the serial port info
         Ok(Self {
@@ -914,9 +1011,14 @@ impl Spcr {
     }
 }
 /// Initialize the ACPI subsystem
+///
+/// # Returns
+///
+/// (), on error [`Error`]
+///
 pub unsafe fn init() -> Result<()> {
     // Get the ACPI table base from the EFI
-    let rsdp_addr = efi::get_acpi_table().map_err(|e| Error::EfiError(e))?;
+    let rsdp_addr = efi::get_acpi_table().map_err(Error::EfiError)?;
     
     // Validate and get the RSDP
     let rsdp = RsdpExtended::from_addr(PhysAddr(rsdp_addr as u64))?;
@@ -975,7 +1077,7 @@ pub unsafe fn init() -> Result<()> {
                 crate::serial::Serial::init(spcr.address)?;
             }
 
-            // Unknown
+            // Unknown 
             _ => {}
         }
     }
