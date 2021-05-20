@@ -1,6 +1,8 @@
-//! Module which provides a `RangeSet` which contains non-overlapping sets of
+//! Library which provides a `RangeSet` which contains non-overlapping sets of
 //! `u64` inclusive ranges. The `RangeSet` can be used to insert or remove
 //! ranges of `u64`s and thus is very useful for physical memory management.
+
+#![no_std]
 
 use core::cmp;
 

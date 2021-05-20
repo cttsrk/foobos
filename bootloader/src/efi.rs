@@ -10,7 +10,7 @@
 
 use core::mem::size_of;
 use core::sync::atomic::{AtomicPtr, Ordering};
-use crate::mm::rangeset::{self, Range, RangeSet};
+use rangeset::{Range, RangeSet};
 
 /// A `Result` type which wraps an EFI error
 type Result<T> = core::result::Result<T, Error>;

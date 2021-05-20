@@ -2,7 +2,7 @@
 
 set -e
 
-cargo build --target x86_64-unknown-uefi
+cargo build --release --target x86_64-unknown-uefi
 
 qemu-system-x86_64 \
     -smp 2 \
@@ -11,7 +11,7 @@ qemu-system-x86_64 \
     -nographic \
     -bios firmware/OVMF_CODE-pure-efi.fd \
     -device driver=e1000,netdev=n0 \
-    -netdev user,id=n0,tftp=target/x86_64-unknown-uefi/debug,bootfile=foobos.efi \
+    -netdev user,id=n0,tftp=target/x86_64-unknown-uefi/release,bootfile=foobos.efi \
 
     #2>&1 | sed \
     #-e 's/.*DVD-ROM.*/truncated QEMU DVD-ROM msg/' \

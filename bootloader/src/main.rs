@@ -1,9 +1,6 @@
 //! Main bootlader entry for foobOS
 
 #![feature(asm, panic_info_message, bool_to_option)]
-#![allow(clippy::redundant_field_names)]
-#![allow(clippy::print_with_newline)]
-#![deny(missing_docs, clippy::missing_docs_in_private_items)]
 #![no_std]
 #![no_main]
 

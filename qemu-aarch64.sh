@@ -2,12 +2,12 @@
 
 set -e
 
-cargo build --release --target aarch64-unknown-uefi.json
+cargo build --release --target .cargo/aarch64-unknown-uefi.json
 
 qemu-system-aarch64 \
     -M virt \
     -smp 2 \
-    -m 4096 \
+    -m 512 \
     -cpu cortex-a57 \
     -nographic \
     -bios firmware/edk2-aarch64-code.fd \
