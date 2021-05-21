@@ -199,7 +199,7 @@ pub fn get_memory_map(image_handle: EfiHandle) -> Result<RangeSet> {
     if st.is_null() { return Err(Error::NotRegistered); }
 
     // Create an empty memory map
-    let mut memory_map = [0u8; 8 * 1024];
+    let mut memory_map = [0u8; 16 * 1024];
 
     // The Rust memory map
     let mut usable_memory = RangeSet::new();
@@ -220,7 +220,7 @@ pub fn get_memory_map(image_handle: EfiHandle) -> Result<RangeSet> {
             &mut mdesc_version).into();
 
         // Check that the memory map was obtained
-        if ret != EfiStatus::Success {
+        if let EfiStatus::Error(_) = ret {
             return Err(Error::MemoryMap(ret));
         }
 
@@ -256,6 +256,7 @@ pub fn get_memory_map(image_handle: EfiHandle) -> Result<RangeSet> {
             }
         }
     
+        /*
         // Exit boot services
         let ret: EfiStatus = ((*(*st).boot_services).exit_boot_services)(
             image_handle, key).into();
@@ -265,6 +266,7 @@ pub fn get_memory_map(image_handle: EfiHandle) -> Result<RangeSet> {
 
         // Destroy the system table
         EFI_SYSTEM_TABLE.store(core::ptr::null_mut(), Ordering::SeqCst);
+        */
     }
     
     Ok(usable_memory)
@@ -278,7 +280,7 @@ pub struct EfiHandle(usize);
 /// Raw EFI status code
 #[derive(Clone, Copy, Debug)]
 #[repr(transparent)]
-pub struct EfiStatusCode(usize);
+pub struct EfiStatusCode(isize);
 
 /// EFI status codes
 #[derive(Debug, PartialEq, Eq)]
@@ -295,63 +297,60 @@ pub enum EfiStatus {
 
 impl From<EfiStatusCode> for EfiStatus {
     fn from(val: EfiStatusCode) -> Self {
-        // Sign extend the error code to make this code bitness agnostic
-        let val = val.0 as i32 as i64 as u64;
-        match val {
-            0 => {
-                Self::Success
-            }
-            0x0000000000000001..=0x7fffffffffffffff => {
-                EfiStatus::Warning(match val & !(1 << 63) {
-                    1 => EfiWarning::UnknownGlyph,
-                    2 => EfiWarning::DeleteFailure,
-                    3 => EfiWarning::WriteFailure,
-                    4 => EfiWarning::BufferTooSmall,
-                    5 => EfiWarning::StaleData,
-                    6 => EfiWarning::FileSystem,
-                    7 => EfiWarning::ResetRequired,
-                    _ => EfiWarning::Unknown(val),
-                })
-            }
-            0x8000000000000000..=0xcfffffffffffffff => {
-                EfiStatus::Error(match val & !(1 << 63) {
-                     1 => EfiError::LoadError,
-                     2 => EfiError::InvalidParameter,
-                     3 => EfiError::Unsupported,
-                     4 => EfiError::BadBufferSize,
-                     5 => EfiError::BufferTooSmall,
-                     6 => EfiError::NotReady,
-                     7 => EfiError::DeviceError,
-                     8 => EfiError::WriteProtected,
-                     9 => EfiError::OutOfResources,
-                    10 => EfiError::VolumeCorrupted,
-                    11 => EfiError::VolumeFull,
-                    12 => EfiError::NoMedia,
-                    13 => EfiError::MediaChanged,
-                    14 => EfiError::NotFound,
-                    15 => EfiError::AccessDenied,
-                    16 => EfiError::NoResponse,
-                    17 => EfiError::NoMapping,
-                    18 => EfiError::Timeout,
-                    19 => EfiError::NotStarted,
-                    20 => EfiError::AlreadyStarted,
-                    21 => EfiError::Aborted,
-                    22 => EfiError::IcmpError,
-                    23 => EfiError::TftpError,
-                    24 => EfiError::ProtocolError,
-                    25 => EfiError::IncompatibleVersion,
-                    26 => EfiError::SecurityViolation,
-                    27 => EfiError::CrcError,
-                    28 => EfiError::EndOfMedia,
-                    31 => EfiError::EndOfFile,
-                    32 => EfiError::InvalidLanguage,
-                    33 => EfiError::CompromisedData,
-                    34 => EfiError::IpAddressConflict,
-                    35 => EfiError::HttpError,
-                    _  => EfiError::Unknown(val),
-                })
-            }
-            _ => unreachable!(),
+        // Erase the top bit of the status code
+        let value = ((val.0 as usize) << 1) >> 1;
+
+        if val.0 == 0 {
+            // Success
+            Self::Success
+        } else if val.0 > 0 {
+            EfiStatus::Warning(match value {
+                1 => EfiWarning::UnknownGlyph,
+                2 => EfiWarning::DeleteFailure,
+                3 => EfiWarning::WriteFailure,
+                4 => EfiWarning::BufferTooSmall,
+                5 => EfiWarning::StaleData,
+                6 => EfiWarning::FileSystem,
+                7 => EfiWarning::ResetRequired,
+                _ => EfiWarning::Unknown(value as u64),
+            })
+        } else {
+            EfiStatus::Error(match value {
+                 1 => EfiError::LoadError,
+                 2 => EfiError::InvalidParameter,
+                 3 => EfiError::Unsupported,
+                 4 => EfiError::BadBufferSize,
+                 5 => EfiError::BufferTooSmall,
+                 6 => EfiError::NotReady,
+                 7 => EfiError::DeviceError,
+                 8 => EfiError::WriteProtected,
+                 9 => EfiError::OutOfResources,
+                10 => EfiError::VolumeCorrupted,
+                11 => EfiError::VolumeFull,
+                12 => EfiError::NoMedia,
+                13 => EfiError::MediaChanged,
+                14 => EfiError::NotFound,
+                15 => EfiError::AccessDenied,
+                16 => EfiError::NoResponse,
+                17 => EfiError::NoMapping,
+                18 => EfiError::Timeout,
+                19 => EfiError::NotStarted,
+                20 => EfiError::AlreadyStarted,
+                21 => EfiError::Aborted,
+                22 => EfiError::IcmpError,
+                23 => EfiError::TftpError,
+                24 => EfiError::ProtocolError,
+                25 => EfiError::IncompatibleVersion,
+                26 => EfiError::SecurityViolation,
+                27 => EfiError::CrcError,
+                28 => EfiError::EndOfMedia,
+                31 => EfiError::EndOfFile,
+                32 => EfiError::InvalidLanguage,
+                33 => EfiError::CompromisedData,
+                34 => EfiError::IpAddressConflict,
+                35 => EfiError::HttpError,
+                _  => EfiError::Unknown(value as u64),
+            })
         }
     }
 }

@@ -2,10 +2,13 @@
 //! about CPU topography and NUMA memory regions
 
 use core::mem::size_of;
-use core::convert::TryInto;
 
 use crate::mm::physmem::{PhysAddr, PhysSlice};
 use crate::efi;
+use generic_access_structure::{Gas, AccessSize};
+
+/// Maximum number of cores on the system
+const MAX_CORES: usize = 512;
 
 /// A `Result` type which wraps an ACPI error
 pub type Result<T> = core::result::Result<T, Error>;
@@ -62,33 +65,6 @@ pub enum Error {
     /// An ACPI table did not match the expected length
     LengthMismatch(TableType),
 
-    /// A register bit width specified by a Generic Address Structure was zero
-    GasWidthZero,
-
-    /// A register bit width specified by a Generic Address Structure was not
-    /// divisible by 8
-    GasWidthNotMod8,
-
-    /// A register bit offset was non-zero, this is allowed by the spec but is
-    /// not supposed to happen on architectures supported by this OS
-    GasOffsetNonZero,
-
-    /// An integer overflow occurred when computing a Generic Address Structure
-    /// offset
-    GasAddressOverflow,
-
-    /// A Generic Address Structure with an unimplemented type, not supported
-    GasTypeUnimplemented,
-
-    /// An access size was not specified by a Generic Address Structure and we
-    /// were unable to satisfy the operation
-    GasInvalidAccessSize,
-
-    /// An I/O port address was specified in a Generic Address Structure and
-    /// I/O ports are not supported on this architecture
-    #[allow(dead_code)]
-    GasIoPortNotAvailable,
-
     /// An attempt was made to access the extended RSDP but the ACPI
     /// revision of this system is too old and does not support it. ACPI
     /// revision 2.0 is required for extended RSDP.
@@ -99,6 +75,9 @@ pub enum Error {
     
     /// An integer overflow occured
     IntegerOverflow,
+
+    /// More CPUs have been detected than we statically allocate room for
+    TooManyCpus,
 }
 
 /// Compute an ACPI checksum on physical memory
@@ -336,7 +315,61 @@ impl Table {
 }
 
 /// The Multiple APIC Description Table
-struct Madt;
+struct Madt {
+    /// Local APICs detected from ACPI
+    apics: [LocalApic; MAX_CORES],
+
+    /// Number of APCIs which have been initialized in `apics`
+    num_apics: usize,
+
+    /// Number of x2APICs detected from ACPI
+    x2apics: [LocalApic; MAX_CORES],
+
+    /// Number of X2APCIs which have been initialized in `x2apics`
+    num_x2apics: usize,
+}
+
+/// Processor Local APIC structure
+#[derive(Default, Debug, Clone, Copy)]
+#[repr(C, packed)]
+struct LocalApic {
+    /// The OS associates this local APIC structure with a processor object in
+    /// the namespace when the _UID child object of the processor's device
+    /// object (or the ProcessorId listed in the Processor declaration
+    /// operator) evaluates to a numeric value that matches the numeric value
+    /// in this field.
+    acpi_processor_uid: u8,
+
+    /// The processor's Local APIC ID
+    apic_id: u8,
+
+    /// Local APIC flags
+    ///
+    /// Bit 0: Enabled (set if ready for use)
+    /// Bit 1: Online Capable (RAZ is enabled, indicates
+    /// if the APIC can be enabled at runtime)
+    flags: u32,
+}
+
+/// Processor Local x2APIC Structure
+#[derive(Default, Debug, Clone, Copy)]
+#[repr(C, packed)]
+struct LocalX2Apic {
+    /// Reserved - must be zero
+    reserved: u16,
+
+    /// The processor's local X2APIC ID
+    x2apic_id: u32,
+
+    /// Same as Local APIC flags
+    flags: u32,
+
+    /// OSPM associates the X2APIC Structure with a processor object declared
+    /// in the namespace using the Device statement, when the _UID child object
+    /// of the processor device evaluates to a numeric value, by matching the
+    /// numeric value with this field
+    acpi_processor_uid: u32,
+}
 
 impl Madt {
     /// Parse the payload of an ACPI MADT table
@@ -363,6 +396,14 @@ impl Madt {
         // Get the APIC flags
         let _flags = slice.consume::<u32>().map_err(|_| E)?;
 
+        // Create an empty `Madt`
+        let mut ret = Self {
+            apics:   [Default::default(); MAX_CORES],
+            num_apics:   0,
+            x2apics: [Default::default(); MAX_CORES],
+            num_x2apics: 0,
+        };
+
         // Handle Interrupt Controller Structures
         while slice.len() > 0 {
             // Read the interrupt controller structure headeo:
@@ -372,29 +413,6 @@ impl Madt {
             
             match typ {
                 0 => {
-                    /// Processor Local APIC structure
-                    #[derive(Debug, Clone, Copy)]
-                    #[repr(C, packed)]
-                    struct LocalApic {
-                        /// The OS associates this local APIC structure with a
-                        /// processor object in the namespace when the _UID
-                        /// child object of the processor's device object (or
-                        /// the ProcessorId listed in the Processor
-                        /// declaration operator) evaluates to a numeric value
-                        /// that matches the numeric value in this field.
-                        acpi_processor_uid: u8,
-
-                        /// The processor's Local APIC ID
-                        apic_id: u8,
-
-                        /// Local APIC flags
-                        ///
-                        /// Bit 0: Enabled (set if ready for use)
-                        /// Bit 1: Online Capable (RAZ is enabled, indicates
-                        /// if the APIC can be enabled at runtime)
-                        flags: u32,
-                    }
-
                     // Ensure the data is the correct size
                     if len as usize != size_of::<LocalApic>() {
                         return Err(E);
@@ -403,31 +421,14 @@ impl Madt {
                     // Get the `LocalApic` information
                     let apic = slice.consume::<LocalApic>().map_err(|_| E)?;
 
+                    // Update APIC information
+                    *ret.apics.get_mut(ret.num_apics)
+                        .ok_or(Error::TooManyCpus)? = apic;
+                    ret.num_apics += 1;
+
                     print!("{:#x?}\n", apic);
                 }
                 9 => {
-                    /// Processor Local x2APIC Structure
-                    #[derive(Debug, Clone, Copy)]
-                    #[repr(C, packed)]
-                    struct LocalX2Apic {
-                        /// Reserved - must be zero
-                        reserved: u16,
-
-                        /// The processor's local X2APIC ID
-                        x2apic_id: u32,
-
-                        /// Same as Local APIC flags
-                        flags: u32,
-
-                        /// OSPM associates the X2APIC Structure with a
-                        /// processor object declared in the namespace using
-                        /// the Device statement, when the _UID child object
-                        /// of the processor device evaluates to a numeric
-                        /// value, by matching the numeric value with this
-                        /// field
-                        acpi_processor_uid: u32,
-                    }
-
                     // Ensure the data is the correct size
                     if len as usize != size_of::<LocalX2Apic>() {
                         return Err(E);
@@ -445,7 +446,7 @@ impl Madt {
             }
         }
         
-        Ok(Self)
+        Ok(ret)
     }
 }
 
@@ -546,424 +547,6 @@ impl From<u8> for SerialInterface {
     }
 }
 
-/// An acess size for an ACPI Generaic Access Structure
-#[derive(Debug, Clone, Copy)]
-pub enum AccessSize {
-    /// Undefined (legacy reasons)
-    Undefined,
-
-    /// Byte access
-    Byte,
-
-    /// Word access
-    Word,
-
-    /// Dword access
-    Dword,
-
-    /// Qword access
-    Qword,
-
-    /// Not defined by the spec
-    Unspecified,
-}
-
-impl From<u8> for AccessSize {
-    fn from(val: u8) -> Self {
-        match val {
-            0 => Self::Undefined,
-            1 => Self::Byte,
-            2 => Self::Word,
-            3 => Self::Dword,
-            4 => Self::Qword,
-            _ => Self::Unspecified,
-        }
-    }
-}
-
-/// An I/O port address
-#[derive(Clone, Copy, Debug)]
-pub struct IoAddr(pub u64);
-
-impl IoAddr {
-    /// Read a value from an I/O port
-    ///
-    /// # Returns
-    ///
-    /// The value read from the I/O port, or en error [`Error`]
-    ///
-    unsafe fn read_u8(&self) -> Result<u8> {
-        #[cfg(target_arch = "x86_64")]
-        {
-            let val: u8;
-            asm!("in al, dx", out("al") val, in("dx") self.0,
-                options(nomem, nostack, preserves_flags));
-            Ok(val)
-        }
-
-        #[cfg(not(target_arch = "x86_64"))]
-        Err(Error::GasIoPortNotAvailable)
-    }
-
-    /// Read a value from an I/O port
-    ///
-    /// # Returns
-    ///
-    /// The value read from the I/O port, or en error [`Error`]
-    ///
-    unsafe fn read_u16(&self) -> Result<u16> {
-        #[cfg(target_arch = "x86_64")]
-        {
-            let val: u16;
-            asm!("in ax, dx", out("ax") val, in("dx") self.0,
-                options(nomem, nostack, preserves_flags));
-            Ok(val)
-        }
-
-        #[cfg(not(target_arch = "x86_64"))]
-        Err(Error::GasIoPortNotAvailable)
-    }
-
-    /// Read a value from an I/O port
-    ///
-    /// # Returns
-    ///
-    /// The value read from the I/O port, or en error [`Error`]
-    ///
-    unsafe fn read_u32(&self) -> Result<u32> {
-        #[cfg(target_arch = "x86_64")]
-        {
-            let val: u32;
-            asm!("in eax, dx", out("eax") val, in("dx") self.0,
-                options(nomem, nostack, preserves_flags));
-            Ok(val)
-        }
-
-        #[cfg(not(target_arch = "x86_64"))]
-        Err(Error::GasIoPortNotAvailable)
-    }
-
-    /// Write a `_val` to the I/O port
-    ///
-    /// # Parameters
-    ///
-    /// * `_val` - The value to write to the I/O port
-    ///
-    /// # Returns
-    ///
-    /// `()`, on error [`Error`]
-    ///
-    unsafe fn write_u8(&self, _val: u8) -> Result<()> {
-        #[cfg(target_arch = "x86_64")]
-        {
-            asm!("out dx, al", in("dx") self.0, in("al") _val,
-                options(nomem, nostack, preserves_flags));
-            Ok(())
-        }
-
-        #[cfg(not(target_arch = "x86_64"))]
-        Err(Error::GasIoPortNotAvailable)
-    }
-
-    /// Write a `_val` to the I/O port
-    ///
-    /// # Parameters
-    ///
-    /// * `_val` - The value to write to the I/O port
-    ///
-    /// # Returns
-    ///
-    /// `()`, on error [`Error`]
-    ///
-    unsafe fn write_u16(&self, _val: u16) -> Result<()> {
-        #[cfg(target_arch = "x86_64")]
-        {
-            asm!("out dx, ax", in("dx") self.0, in("ax") _val,
-                options(nomem, nostack, preserves_flags));
-            Ok(())
-        }
-
-        #[cfg(not(target_arch = "x86_64"))]
-        Err(Error::GasIoPortNotAvailable)
-    }
-
-    /// Write a `_val` to the I/O port
-    ///
-    /// # Parameters
-    ///
-    /// * `_val` - The value to write to the I/O port
-    ///
-    /// # Returns
-    ///
-    /// `()`, on error [`Error`]
-    ///
-    unsafe fn write_u32(&self, _val: u32) -> Result<()> {
-        #[cfg(target_arch = "x86_64")]
-        {
-            asm!("out dx, eax", in("dx") self.0, in("eax") _val,
-                options(nomem, nostack, preserves_flags));
-            Ok(())
-        }
-
-        #[cfg(not(target_arch = "x86_64"))]
-        Err(Error::GasIoPortNotAvailable)
-    }
-}
-
-/// An ACPI Generic Access Structure
-#[derive(Debug)]
-pub enum Gas {
-    /// An address in system memory space
-    Memory {
-        /// Base address
-        addr: PhysAddr,
-
-        /// Width of a register (in bits) (i.e. the stride to access indices)
-        register_width: u8,
-
-        /// Register offset (in bits)
-        register_offset: u8,
-
-        /// Access size
-        access_size: AccessSize,
-    },
-
-    /// An address in system I/O space
-    Io {
-        /// Base I/O address
-        addr: IoAddr,
-
-        /// Width of a register (in bits) (i.e. the stride to access indices)
-        register_width: u8,
-
-        /// Register offset (in bits)
-        register_offset: u8,
-
-        /// Access size
-        access_size: AccessSize,
-    },
-
-    /// An unimplemented `Gas` type
-    Unimplemented,
-}
-
-/// An abbreviated format for a `Gas` which has been indexed and checked
-enum GasType {
-    /// An address in system memory space
-    Memory {
-        /// Address
-        addr: PhysAddr, 
-        /// Access size
-        access_size: AccessSize
-    },
-
-    /// An address in system I/O space
-    Io {
-        /// I/O address
-        addr: IoAddr,
-
-        /// Access size
-        access_size: AccessSize
-    },
-}
-
-impl GasType {
-    /// Read a value from the location specified by `self`
-    ///
-    /// # Returns
-    ///
-    /// A zero-extended version of the read value. The original size is
-    /// specified by the [`AccessSize`].
-    ///
-    unsafe fn read(&self) -> Result<u64> {
-        Ok(match self {
-            Self::Io { addr, access_size } => {
-                // Perform the read
-                match access_size {
-                    AccessSize::Byte  => addr.read_u8()?  as u64,
-                    AccessSize::Word  => addr.read_u16()? as u64,
-                    AccessSize::Dword => addr.read_u32()? as u64,
-                    _ => return Err(Error::GasInvalidAccessSize),
-                }
-            },
-            Self::Memory { addr, access_size } => {
-                // Perform the read
-                match access_size {
-                    AccessSize::Byte  => addr.read::<u8>()  as u64,
-                    AccessSize::Word  => addr.read::<u16>() as u64,
-                    AccessSize::Dword => addr.read::<u32>() as u64,
-                    AccessSize::Qword => addr.read::<u64>() as u64,
-                    _ => return Err(Error::GasInvalidAccessSize),
-                }
-            },
-        })
-    }
-
-    /// Write a value to the location specified by `self`
-    ///
-    /// # Parameters
-    ///
-    /// * `val` - A value to be written to the location. This value is
-    ///           truncated to the size specified by the [`AccessSize`] of the
-    ///           [`GasType`] .
-    ///
-    /// # Returns
-    ///
-    /// `()`, on error [`Error`]
-    ///
-    unsafe fn write(&self, val: u64) -> Result<()> {
-        match self {
-            Self::Io { addr, access_size } => {
-                // Perform the write
-                match access_size {
-                    AccessSize::Byte  => addr.write_u8( val as u8)?,
-                    AccessSize::Word  => addr.write_u16(val as u16)?,
-                    AccessSize::Dword => addr.write_u32(val as u32)?,
-                    _ => return Err(Error::GasInvalidAccessSize),
-                }
-            },
-            Self::Memory { addr, access_size } => {
-                // Perform the write
-                match access_size {
-                    AccessSize::Byte  => addr.write(val as u8),
-                    AccessSize::Word  => addr.write(val as u16),
-                    AccessSize::Dword => addr.write(val as u32),
-                    AccessSize::Qword => addr.write(val as u64),
-                    _ => return Err(Error::GasInvalidAccessSize),
-                }
-            },
-        }
-
-        Ok(())
-    }
-}
-
-impl Gas {
-    /// Read a value from the location specified by `self` offset by `idx`
-    ///
-    /// # Parameters
-    ///
-    /// * `idx` - The zero-indexed offset to be applied to the base of the
-    ///           location, specified in number of elements. The width of an
-    ///           element is determined by the `register_width`.
-    ///
-    /// # Returns
-    ///
-    /// A zero-extended version of the read value. The original size is
-    /// specified by the [`AccessSize`].
-    ///
-    /// Reads a `val` based on the `self` at the register index `idx`
-    pub unsafe fn read(&self, idx: usize) -> Result<u64> {
-        self.addr(idx)?.read()
-    }
-
-    /// Write a value to the location specified by `self`
-    ///
-    /// # Parameters
-    ///
-    /// * `idx` - The zero-indexed offset to be applied to the base of the
-    ///           location, specified in number of elements. The width of an
-    ///           element is determined by the `register_width`.
-    /// * `val` - A value to be written to the location. This value is
-    ///           truncated to the size specified by the [`AccessSize`] of the
-    ///           [`GasType`] .
-    ///
-    /// # Returns
-    ///
-    /// `()`, on error [`Error`]
-    ///
-    pub unsafe fn write(&self, idx: usize, val: u64) -> Result<()> {
-        self.addr(idx)?.write(val)
-    }
-
-    /// Compute the address to access the register associated with this [`Gas`] 
-    /// based on the `idx`
-    ///
-    /// # Parameters
-    ///
-    /// * `idx` - The zero-indexed offset to be applied to the base of the
-    ///           location, specified in number of elements. The width of an
-    ///           element is determined by the `register_width`.
-    /// 
-    /// # Returns
-    /// 
-    /// The [`GasType`] which contains a simplified post-indexed representation
-    /// of a [`Gas`], on error [`Error`]
-    ///
-    fn addr(&self, idx: usize) -> Result<GasType> {
-        Ok(match self {
-            Self::Io { addr, register_width,
-                       register_offset, access_size} => {
-                // Check the sanity of the register
-                if *register_width == 0 {
-                    return Err(Error::GasWidthZero);
-                }
-                if *register_width % 8 != 0 {
-                    return Err(Error::GasWidthNotMod8);
-                }
-                if *register_offset != 0 {
-                    return Err(Error::GasOffsetNonZero);
-                }
-
-                // Compute the address of the register to access
-                let addr = IoAddr(
-                    (idx as u64).checked_mul((register_width / 8) as u64)
-                    .and_then(|x| x.checked_add(addr.0))
-                    .ok_or(Error::GasAddressOverflow)?);
-
-                GasType::Io { addr, access_size: *access_size }
-            }
-            Self::Memory { addr, register_width,
-                           register_offset, access_size} => {
-                // Check the sanity of the register
-                if *register_width == 0 {
-                    return Err(Error::GasWidthZero);
-                }
-                if *register_width % 8 != 0 {
-                    return Err(Error::GasWidthNotMod8);
-                }
-                if *register_offset != 0 {
-                    return Err(Error::GasOffsetNonZero);
-                }
-
-                // Compute the address of the register to access
-                let addr = PhysAddr(
-                    (idx as u64).checked_mul((register_width / 8) as u64)
-                    .and_then(|x| x.checked_add(addr.0))
-                    .ok_or(Error::GasAddressOverflow)?);
-
-                GasType::Memory { addr, access_size: *access_size }
-            }
-
-            Self::Unimplemented => {
-                return Err(Error::GasTypeUnimplemented);
-            }
-        })
-    }
-}
-
-impl From<[u8; 12]> for Gas {
-    fn from(val: [u8; 12]) -> Self {
-        match val[0] {
-            0 => Self::Memory {
-                addr: PhysAddr(u64::from_le_bytes(
-                    val[4..12].try_into().unwrap())),
-                register_width:  val[1],
-                register_offset: val[2],
-                access_size:     val[3].into(),
-            },
-            1 => Self::Io {
-                addr: IoAddr(u64::from_le_bytes(
-                    val[4..12].try_into().unwrap())),
-                register_width:  val[1],
-                register_offset: val[2],
-                access_size: val[3].into(),
-            },
-            _ => Self::Unimplemented,
-        }
-    }
-}
-
 /// The Serial Port Console Redirection table
 #[derive(Debug)]
 struct Spcr {
@@ -1010,13 +593,23 @@ impl Spcr {
         })
     }
 }
+
+/// Information parsed out of ACPI
+pub struct Acpi {
+    /// Contains information about the APICs from the MADT
+    madt: Option<Madt>,
+
+    /// Contains information from ACPI data structures about the serial device
+    spcr: Option<Spcr>,
+}
+
 /// Initialize the ACPI subsystem
 ///
 /// # Returns
 ///
-/// (), on error [`Error`]
+/// Parsed [`Acpi`] information on success, on error [`Error`]
 ///
-pub unsafe fn init() -> Result<()> {
+pub unsafe fn init() -> Result<Acpi> {
     // Get the ACPI table base from the EFI
     let rsdp_addr = efi::get_acpi_table().map_err(Error::EfiError)?;
     
@@ -1037,6 +630,12 @@ pub unsafe fn init() -> Result<()> {
     // Get the number of entries in the XSDT
     let entries = len / size_of::<u64>();
 
+    // Parsed ACPI information
+    let mut ret = Acpi {
+        madt: None,
+        spcr: None,
+    };
+
     // Go through each table in the XSDT
     for idx in 0..entries {
         // Get the physical address of the XSDT entry
@@ -1054,13 +653,13 @@ pub unsafe fn init() -> Result<()> {
 
         match typ {
             TableType::Madt => {
-                Madt::from_addr(data, len)?;
+                ret.madt = Some(Madt::from_addr(data, len)?);
             }
 
             TableType::Spcr => {
-                let mut spcr = Spcr::from_addr(data, len)?;
-                print!("{:#x?}\n", spcr);
+                ret.spcr = Some(Spcr::from_addr(data, len)?);
 
+                /*
                 // Sometimes the I/O port on 16550 serial interfaces is set to
                 // `Undefined` in the SPCR. We know that for x86_64 16550's,
                 // the access size should always be byte.
@@ -1075,6 +674,7 @@ pub unsafe fn init() -> Result<()> {
 
                 // Initialize the serial device
                 crate::serial::Serial::init(spcr.address)?;
+                */
             }
 
             // Unknown 
@@ -1082,9 +682,10 @@ pub unsafe fn init() -> Result<()> {
         }
     }
     
-    if crate::serial::SERIAL_DEVICE.is_none() {
-        panic!("Could not find valid serial device to use");
+    if let Some(madt) = ret.madt.as_ref(){
+        print!("APICs:   {}\n", madt.num_apics);
+        print!("x2APICs: {}\n", madt.num_x2apics);
     }
-
-    Ok(())
+    
+    Ok(ret)
 }

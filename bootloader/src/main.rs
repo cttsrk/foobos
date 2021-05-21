@@ -52,7 +52,9 @@ extern fn efi_main(image_handle: EfiHandle,
         print!("\nFoobOS/{} boot\n\n", arch);
 
         // Initialize ACPI
-        acpi::init().expect("Failed to initialize ACPI");
+        let acpi = acpi::init().expect("Failed to initialize ACPI");
+
+        print!("Mooster\n");
 
         // Get the memory map and exit boot services
         let mut mm = efi::get_memory_map(image_handle)

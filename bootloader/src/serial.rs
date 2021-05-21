@@ -1,6 +1,6 @@
 //! A basic 16550 serial driver
 
-use crate::acpi::{Result, Gas};
+use generic_access_structure::{Gas, Result};
 
 /// Global serial device implementation
 pub static mut SERIAL_DEVICE: Option<Serial> = None;
