@@ -9,11 +9,10 @@ mod core_requirements;
 mod efi;
 mod mm;
 mod acpi;
-mod serial;
 
 use core::panic::PanicInfo;
-
 use crate::efi::{EfiHandle, EfiSystemTablePtr, EfiStatusCode};
+use serial::Serial;
 
 /// Entry point for panics
 #[panic_handler]
@@ -53,18 +52,21 @@ extern fn efi_main(image_handle: EfiHandle,
 
         // Initialize ACPI
         let acpi = acpi::init().expect("Failed to initialize ACPI");
+        print!("{:#x?}\n", acpi);
+        
+        // Initialize serial
+        let spcr = acpi.spcr.as_ref()
+            .expect("ACPI did not report an SPCR, cannot initialize serial");
 
-        print!("Mooster\n");
-
+        // Initialize the serial device
+        Serial::init(spcr.interface_type, spcr.address, spcr.baud_rate)
+            .expect("Failed to initialize the serial device");
+        
         // Get the memory map and exit boot services
-        let mut mm = efi::get_memory_map(image_handle)
+        let mm = efi::get_memory_map_and_exit_boot_services(image_handle)
             .expect("Failed to get EFI memory map");
-        print!("Bye EFI\n");
+        print!("Exited boot services, bye EFI\n");
 
-        let addr = mm.allocate(1024 * 1024, 4096).unwrap();
-        print!("Allocated {:#x}\n", addr);
-
-        // print!("{:#x?}\n", mm.entries());
         print!("Physical free: {}\n", mm.sum().unwrap());
 
         print!("EFI MAIN {:#x}\n", efi_main as usize);

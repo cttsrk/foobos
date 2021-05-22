@@ -179,7 +179,7 @@ pub fn get_acpi_table() -> Result<usize> {
     }).ok_or(Error::AcpiTableNotFound)
 }
 
-/// Get the memory map for the system from the UEFI
+/// Get the memory map for the system from the UEFI, and exit boot services
 ///
 /// # Parameters
 ///
@@ -191,7 +191,15 @@ pub fn get_acpi_table() -> Result<usize> {
 /// available for general purpose use from this point onwards. On error
 /// [`Error`] .
 /// 
-pub fn get_memory_map(image_handle: EfiHandle) -> Result<RangeSet> {
+/// # Safety
+///
+/// This function disables use of UEFI boot services, which terminates our
+/// ability to use the [`EFI_SYSTEM_TABLE`]. Thus this function must be called
+/// in a single threaded context, as other threads could potentially be using
+/// the [`EFI_SYSTEM_TABLE`] when we delete it.
+///
+pub unsafe fn get_memory_map_and_exit_boot_services(image_handle: EfiHandle)
+        -> Result<RangeSet> {
     // Get the system table
     let st = EFI_SYSTEM_TABLE.load(Ordering::SeqCst);
 
@@ -204,70 +212,66 @@ pub fn get_memory_map(image_handle: EfiHandle) -> Result<RangeSet> {
     // The Rust memory map
     let mut usable_memory = RangeSet::new();
 
-    unsafe {
-        // Set up the initial arguments to the `get_memory_map` EFI call
-        let mut size = core::mem::size_of_val(&memory_map);
-        let mut key = 0;
-        let mut mdesc_size = 0;
-        let mut mdesc_version = 0;
+    // Set up the initial arguments to the `get_memory_map` EFI call
+    let mut size = core::mem::size_of_val(&memory_map);
+    let mut key = 0;
+    let mut mdesc_size = 0;
+    let mut mdesc_version = 0;
 
-        // Get the memory map
-        let ret: EfiStatus = ((*(*st).boot_services).get_memory_map)(
-            &mut size,
-            memory_map.as_mut_ptr(),
-            &mut key,
-            &mut mdesc_size,
-            &mut mdesc_version).into();
+    // Get the memory map
+    let ret: EfiStatus = ((*(*st).boot_services).get_memory_map)(
+        &mut size,
+        memory_map.as_mut_ptr(),
+        &mut key,
+        &mut mdesc_size,
+        &mut mdesc_version).into();
 
-        // Check that the memory map was obtained
-        if let EfiStatus::Error(_) = ret {
-            return Err(Error::MemoryMap(ret));
-        }
-
-        // Go through each memory map entry
-        for off in (0..size).step_by(mdesc_size) {
-            // Read the memory as a descriptor
-            let entry = core::ptr::read_unaligned(
-                memory_map.get(off..)
-                    .ok_or(Error::MemoryMapOutOfBounds)?
-                    .get(..off + size_of::<EfiMemoryDescriptor>())
-                    .ok_or(Error::MemoryMapOutOfBounds)?
-                    .as_ptr() as *const EfiMemoryDescriptor);
-
-            // Convert the type into our Rust enum
-            let typ: EfiMemoryType = entry.typ.into();
-
-            // Check if this memory is usable after we exit boot services
-            if typ.avail_post_exit_boot_services() &&
-                    entry.number_of_pages > 0 {
-                // Get the number of bytes for this memory region
-                let bytes = entry.number_of_pages.checked_mul(4096)
-                    .ok_or(Error::MemoryMapIntegerOverflow)?;
-
-                // Compute the end physical address of this region
-                let end = entry.physical_start.checked_add(bytes - 1)
-                    .ok_or(Error::MemoryMapIntegerOverflow)?;
-
-                // Set the usable memory information
-                usable_memory.insert(Range {
-                    start: entry.physical_start,
-                    end:   end
-                }).map_err(Error::MemoryRangeSet)?;
-            }
-        }
-    
-        /*
-        // Exit boot services
-        let ret: EfiStatus = ((*(*st).boot_services).exit_boot_services)(
-            image_handle, key).into();
-        if ret != EfiStatus::Success {
-            return Err(Error::ExitBootServices(ret));
-        }
-
-        // Destroy the system table
-        EFI_SYSTEM_TABLE.store(core::ptr::null_mut(), Ordering::SeqCst);
-        */
+    // Check that the memory map was obtained
+    if let EfiStatus::Error(_) = ret {
+        return Err(Error::MemoryMap(ret));
     }
+
+    // Go through each memory map entry
+    for off in (0..size).step_by(mdesc_size) {
+        // Read the memory as a descriptor
+        let entry = core::ptr::read_unaligned(
+            memory_map.get(off..)
+                .ok_or(Error::MemoryMapOutOfBounds)?
+                .get(..off + size_of::<EfiMemoryDescriptor>())
+                .ok_or(Error::MemoryMapOutOfBounds)?
+                .as_ptr() as *const EfiMemoryDescriptor);
+
+        // Convert the type into our Rust enum
+        let typ: EfiMemoryType = entry.typ.into();
+
+        // Check if this memory is usable after we exit boot services
+        if typ.avail_post_exit_boot_services() &&
+                entry.number_of_pages > 0 {
+            // Get the number of bytes for this memory region
+            let bytes = entry.number_of_pages.checked_mul(4096)
+                .ok_or(Error::MemoryMapIntegerOverflow)?;
+
+            // Compute the end physical address of this region
+            let end = entry.physical_start.checked_add(bytes - 1)
+                .ok_or(Error::MemoryMapIntegerOverflow)?;
+
+            // Set the usable memory information
+            usable_memory.insert(Range {
+                start: entry.physical_start,
+                end:   end
+            }).map_err(Error::MemoryRangeSet)?;
+        }
+    }
+
+    // Exit boot services
+    let ret: EfiStatus = ((*(*st).boot_services).exit_boot_services)(
+        image_handle, key).into();
+    if ret != EfiStatus::Success {
+        return Err(Error::ExitBootServices(ret));
+    }
+
+    // Destroy the system table
+    EFI_SYSTEM_TABLE.store(core::ptr::null_mut(), Ordering::SeqCst);
     
     Ok(usable_memory)
 }
@@ -300,6 +304,8 @@ impl From<EfiStatusCode> for EfiStatus {
         // Erase the top bit of the status code
         let value = ((val.0 as usize) << 1) >> 1;
 
+        // FuzzOS: Getting multiple cores booted (Part 2/2) 40 or 42 minute
+        // mark for changing this to match with ordering
         if val.0 == 0 {
             // Success
             Self::Success

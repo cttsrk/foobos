@@ -7,6 +7,7 @@ use core::mem::size_of;
 pub struct PhysAddr(pub u64);
 
 impl PhysAddr {
+    /*
     /// Read a `T` from the aligned physical address at `self`
     ///
     /// # Returns
@@ -28,6 +29,7 @@ impl PhysAddr {
     pub unsafe fn write<T>(&self, val: T) {
         core::ptr::write(self.0 as *mut T, val);
     }
+    */
 
     /// Read an unaligned `T` from physical memory address `self`
     ///

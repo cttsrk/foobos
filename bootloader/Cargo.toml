@@ -8,5 +8,6 @@ edition = "2018"
 
 [dependencies]
 rangeset = { path = "../shared/rangeset" }
+serial = { path = "../shared/serial" }
 generic_access_structure = { path = "../shared/generic_access_structure" }
 

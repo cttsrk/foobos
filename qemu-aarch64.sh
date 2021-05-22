@@ -12,7 +12,4 @@ qemu-system-aarch64 \
     -nographic \
     -bios firmware/edk2-aarch64-code.fd \
     -device driver=virtio-net,netdev=n0 \
-    -netdev user,id=n0,tftp=target/aarch64-unknown-uefi/release,bootfile=foobos.efi \
-
-    #2>&1 > aarch64test.log
-    
+    -netdev user,id=n0,tftp=target/aarch64-unknown-uefi/release,bootfile=foobos.efi

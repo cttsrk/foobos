@@ -5,10 +5,12 @@ use core::mem::size_of;
 
 use crate::mm::physmem::{PhysAddr, PhysSlice};
 use crate::efi;
-use generic_access_structure::{Gas, AccessSize};
+
+use serial::{BaudRate, Interface};
+use generic_access_structure::Gas;
 
 /// Maximum number of cores on the system
-const MAX_CORES: usize = 512;
+const MAX_CORES: usize = 2;
 
 /// A `Result` type which wraps an ACPI error
 pub type Result<T> = core::result::Result<T, Error>;
@@ -76,8 +78,20 @@ pub enum Error {
     /// An integer overflow occured
     IntegerOverflow,
 
-    /// More CPUs have been detected than we statically allocate room for
-    TooManyCpus,
+    /// More APICs have been detected than we statically allocate room for
+    TooManyApics,
+
+    /// More x2APICs have been detected than we statically allocate room for
+    TooManyX2Apics,
+    
+    /// The SPCR did not specify zero parity bits (all other values are reserved)
+    InvalidParityBits,
+
+    /// The SPCR did not specify one stop bit (all other values are reserved)
+    InvalidStopBits,
+
+    /// The SPCR specified a reserved baud rate
+    InvalidBaudRate,
 }
 
 /// Compute an ACPI checksum on physical memory
@@ -315,7 +329,8 @@ impl Table {
 }
 
 /// The Multiple APIC Description Table
-struct Madt {
+#[derive(Debug)]
+pub struct Madt {
     /// Local APICs detected from ACPI
     apics: [LocalApic; MAX_CORES],
 
@@ -323,7 +338,7 @@ struct Madt {
     num_apics: usize,
 
     /// Number of x2APICs detected from ACPI
-    x2apics: [LocalApic; MAX_CORES],
+    x2apics: [LocalX2Apic; MAX_CORES],
 
     /// Number of X2APCIs which have been initialized in `x2apics`
     num_x2apics: usize,
@@ -423,10 +438,8 @@ impl Madt {
 
                     // Update APIC information
                     *ret.apics.get_mut(ret.num_apics)
-                        .ok_or(Error::TooManyCpus)? = apic;
+                        .ok_or(Error::TooManyApics)? = apic;
                     ret.num_apics += 1;
-
-                    print!("{:#x?}\n", apic);
                 }
                 9 => {
                     // Ensure the data is the correct size
@@ -435,9 +448,13 @@ impl Madt {
                     }
                     
                     // Get the `LocalX2Apic` information
-                    let apic = slice.consume::<LocalX2Apic>().map_err(|_| E)?;
-
-                    print!("{:#x?}\n", apic);
+                    let x2apic =
+                        slice.consume::<LocalX2Apic>().map_err(|_| E)?;
+                    
+                    // Update x2APIC information
+                    *ret.x2apics.get_mut(ret.num_x2apics)
+                        .ok_or(Error::TooManyX2Apics)? = x2apic;
+                    ret.num_x2apics += 1;
                 }
                 _ => {
                     // Unknown type, just discard the data
@@ -450,111 +467,17 @@ impl Madt {
     }
 }
 
-/// Different types of serial devices
-#[derive(Debug)]
-enum SerialInterface {
-    /// Full 16550 interface
-    Serial16550,
-
-    /// Full 16450 interface (must also accept writing to the 16550 FCR
-    /// register)
-    Serial16450,
-
-    /// MAX311xxE SPI UART
-    Max311,
-
-    /// ARM PL011 UART
-    ArmPL011,
-
-    /// MSM8x60 (e.g. 8960)
-    Msm8x60,
-
-    /// Nvidia 16550
-    Nvidia16550,
-
-    /// TI OMAP
-    TiOmap,
-
-    /// APM88xxxx
-    Apm88xxxx,
-
-    /// MSM8974
-    Msm8974,
-
-    /// SAM5250
-    Sam5250,
-
-    /// Intel USIF
-    IntelUsif,
-
-    /// i.MX 6
-    IMX6,
-
-    /// (deprecated) ARM SBSA (2.x only) Generic UART supporting only 32-bit
-    /// accesses
-    ArmSbsa32,
-
-    /// ARM SBSA Generic UART
-    ArmSbsa,
-
-    /// ARM DCC
-    ArmDcc,
-
-    /// BCM2835
-    Bcm2835,
-
-    /// SDM845 with a clock rate of 1.8432 MHz
-    Sdm845_18432,
-    
-    /// 16550-compatible with parameters defined in Generic Address Structure
-    Serial16550Gas,
-
-    /// SDM845 with a clock rate of 7.362 MHz
-    Sdm845_7362,
-
-    /// Intel LPSS
-    IntelLpss,
-
-    /// Unknown serial interface
-    Unknown(u8),
-}
-
-impl From<u8> for SerialInterface {
-    fn from(val: u8) -> Self {
-        match val {
-             0 => Self::Serial16550,
-             1 => Self::Serial16450,
-             2 => Self::Max311,
-             3 => Self::ArmPL011,
-             4 => Self::Msm8x60,
-             5 => Self::Nvidia16550,
-             6 => Self::TiOmap,
-             8 => Self::Apm88xxxx,
-             9 => Self::Msm8974,
-            10 => Self::Sam5250,
-            11 => Self::IntelUsif,
-            12 => Self::IMX6,
-            13 => Self::ArmSbsa32,
-            14 => Self::ArmSbsa,
-            15 => Self::ArmDcc,
-            16 => Self::Bcm2835,
-            17 => Self::Sdm845_18432,
-            18 => Self::Serial16550Gas,
-            19 => Self::Sdm845_7362,
-            20 => Self::IntelLpss,
-             _ => Self::Unknown(val),
-        }
-    }
-}
-
 /// The Serial Port Console Redirection table
 #[derive(Debug)]
-struct Spcr {
+pub struct Spcr {
     /// Type of the serial port register interface
-    interface_type: SerialInterface,
+    pub interface_type: Interface,
 
     /// Address to access the serial port
-    address: Gas,
+    pub address: Gas,
+
+    /// Baud rate to use for the serial port
+    pub baud_rate: BaudRate,
 }
 
 impl Spcr {
@@ -577,7 +500,7 @@ impl Spcr {
         let mut slice = PhysSlice::new(addr, size);
 
         // Get the serial interface type
-        let typ: SerialInterface =
+        let typ: Interface =
             slice.consume::<u8>().map_err(|_| E)?.into();
 
         // Reserved (3 bytes)
@@ -586,21 +509,50 @@ impl Spcr {
         // The generic address structure
         let info: Gas = slice.consume::<[u8; 12]>().map_err(|_| E)?.into();
 
+        // Interrupt types, do not care
+        slice.discard(1).map_err(|_| E)?;
+
+        // IRQ, do not care
+        slice.discard(1).map_err(|_| E)?;
+
+        // Global system interrupt vector, do not care
+        slice.discard(4).map_err(|_| E)?;
+
+        // Get the baud rate
+        let baud_rate = match slice.consume::<u8>().map_err(|_| E)? {
+            0 => BaudRate::AsIs,
+            3 => BaudRate::Baud9600,
+            4 => BaudRate::Baud19200,
+            6 => BaudRate::Baud57600,
+            7 => BaudRate::Baud115200,
+            _ => return Err(Error::InvalidBaudRate),
+        };
+
+        // Get parity and stop bit information
+        let parity_bits = slice.consume::<u8>().map_err(|_| E)?;
+        let stop_bits   = slice.consume::<u8>().map_err(|_| E)?;
+
+        // Currently SPCR spec only allows for no parity and one stop bit
+        if parity_bits != 0 { return Err(Error::InvalidParityBits) };
+        if stop_bits   != 1 { return Err(Error::InvalidStopBits)   };
+
         // Return out the serial port info
         Ok(Self {
             interface_type: typ,
-            address: info,
+            address:        info,
+            baud_rate:      baud_rate,
         })
     }
 }
 
 /// Information parsed out of ACPI
+#[derive(Debug)]
 pub struct Acpi {
     /// Contains information about the APICs from the MADT
-    madt: Option<Madt>,
+    pub madt: Option<Madt>,
 
     /// Contains information from ACPI data structures about the serial device
-    spcr: Option<Spcr>,
+    pub spcr: Option<Spcr>,
 }
 
 /// Initialize the ACPI subsystem
@@ -658,33 +610,11 @@ pub unsafe fn init() -> Result<Acpi> {
 
             TableType::Spcr => {
                 ret.spcr = Some(Spcr::from_addr(data, len)?);
-
-                /*
-                // Sometimes the I/O port on 16550 serial interfaces is set to
-                // `Undefined` in the SPCR. We know that for x86_64 16550's,
-                // the access size should always be byte.
-                #[cfg(target_arch = "x86_64")]
-                if let SerialInterface::Serial16550 = spcr.interface_type {
-                    if let Gas::Io { access_size, .. } = &mut spcr.address {
-                        if let AccessSize::Undefined = access_size {
-                            *access_size = AccessSize::Byte;
-                        }
-                    }
-                }
-
-                // Initialize the serial device
-                crate::serial::Serial::init(spcr.address)?;
-                */
             }
 
             // Unknown 
             _ => {}
         }
-    }
-    
-    if let Some(madt) = ret.madt.as_ref(){
-        print!("APICs:   {}\n", madt.num_apics);
-        print!("x2APICs: {}\n", madt.num_x2apics);
     }
     
     Ok(ret)

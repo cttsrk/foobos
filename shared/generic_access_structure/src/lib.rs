@@ -207,7 +207,7 @@ impl IoAddr {
 }
 
 /// An ACPI Generic Access Structure
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum Gas {
     /// An address in system memory space
     Memory {
